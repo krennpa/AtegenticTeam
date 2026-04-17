@@ -17,7 +17,7 @@ from .api.routers.notifications import router as notifications_router
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-app = FastAPI(title="Dynalunch API", version="0.1.0")
+app = FastAPI(title="Umamimatch API", version="0.1.0")
 
 # CORS
 app.add_middleware(

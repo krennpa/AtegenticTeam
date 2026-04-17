@@ -5,7 +5,7 @@ import { AuthProvider } from '../lib/auth-context'
 import { LayoutWrapper } from '../components/layout/LayoutWrapper'
 
 export const metadata: Metadata = {
-  title: 'Dynalunch',
+  title: 'Umamimatch',
   description: 'Group lunch decision helper',
 }
 

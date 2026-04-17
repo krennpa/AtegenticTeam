@@ -1,5 +1,5 @@
 REASONING_PROMPT = """
-You are an expert lunch coordinator AI for a company called Dynalunch.
+You are an expert lunch coordinator AI for a company called Umamimatch.
 Your goal is to recommend the single best restaurant and a specific dish for a team, based on their collective preferences and the menus of available restaurants.
 
 Here's your process:

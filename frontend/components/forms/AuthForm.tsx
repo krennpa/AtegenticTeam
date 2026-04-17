@@ -41,7 +41,7 @@ export function AuthForm({ mode }: AuthFormProps) {
       <CardHeader>
         <CardTitle>{mode === 'login' ? 'Welcome back' : 'Create your account'}</CardTitle>
         <CardDescription>
-          {mode === 'login' ? 'Log in to continue to Dynalunch' : 'Sign up to start making effortless lunch decisions'}
+          {mode === 'login' ? 'Log in to continue to Umamimatch' : 'Sign up to start making effortless lunch decisions'}
         </CardDescription>
       </CardHeader>
       <CardContent>

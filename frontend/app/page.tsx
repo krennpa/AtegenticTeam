@@ -19,7 +19,7 @@ export default function Page() {
       <header className="border-b bg-white/80 backdrop-blur-sm sticky top-0 z-50">
         <div className="container mx-auto px-6 py-4">
           <div className="flex items-center justify-between">
-            <div className="text-2xl font-bold text-slate-900">Dynalunch</div>
+            <div className="text-2xl font-bold text-slate-900">Umamimatch</div>
             <nav className="hidden md:flex items-center gap-8">
               <Link href="#features" className="text-slate-600 hover:text-slate-900 transition-colors">Features</Link>
               <Link href="#how-it-works" className="text-slate-600 hover:text-slate-900 transition-colors">How it works</Link>
@@ -191,7 +191,7 @@ export default function Page() {
             transition={{ duration: 0.6, delay: 0.4 }}
             className="text-center space-y-12"
           >
-            <h2 className="text-4xl font-bold text-slate-900">Why Choose Dynalunch</h2>
+            <h2 className="text-4xl font-bold text-slate-900">Why Choose Umamimatch</h2>
             <div className="grid md:grid-cols-3 gap-8">
               <div className="text-center space-y-4">
                 <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center mx-auto">
@@ -230,7 +230,7 @@ export default function Page() {
             </a>
           </div>
           <div className="text-center text-slate-400 text-sm mt-8">
-            © 2024 Dynalunch. All rights reserved.
+            © 2024 Umamimatch. All rights reserved.
           </div>
         </div>
       </footer>

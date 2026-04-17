@@ -27,7 +27,7 @@ import sys
 import httpx
 import re
 import logging
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, Optional, List, Set, Callable, Awaitable
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from crawl4ai.processors.pdf import PDFCrawlerStrategy, PDFContentScrapingStrategy
 
@@ -962,36 +962,63 @@ class WebScraper:
         return CrawlerRunConfig(**config_dict)
 
 
+async def _scrape_with_browser_strategy(url: str, headless: bool = True) -> Dict[str, Any]:
+    """Primary crawl4ai browser strategy."""
+    try:
+        scraper = WebScraper(headless=headless)
+        return await scraper.scrape(url)
+    except (NotImplementedError, RuntimeError, OSError) as e:
+        return {
+            'success': False,
+            'url': url,
+            'error': f"Browser strategy failed: {type(e).__name__}",
+            'scraper_type': 'browser_strategy'
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'url': url,
+            'error': f"Browser strategy failed: {e}",
+            'scraper_type': 'browser_strategy'
+        }
+
+
+async def _scrape_with_simple_http_strategy(url: str, headless: bool = True) -> Dict[str, Any]:
+    """Simple HTTP fallback strategy (headless arg kept for unified signature)."""
+    from .simple_scraper import scrape_url_simple
+    return await scrape_url_simple(url)
+
+
+SCRAPE_STRATEGIES: List[Callable[[str, bool], Awaitable[Dict[str, Any]]]] = [
+    _scrape_with_browser_strategy,
+    _scrape_with_simple_http_strategy,
+]
+
+
 async def scrape_url(url: str, headless: bool = True) -> Dict[str, Any]:
-    """Convenience function to scrape a single URL with fallback.
-    
+    """Convenience function to scrape a single URL with ordered strategies.
+
     Args:
         url: URL to scrape
         headless: Whether to run in headless mode
-        
+
     Returns:
         Scrape result dictionary
     """
-    try:
-        scraper = WebScraper(headless=headless)
-        result = await scraper.scrape(url)
-        
-        # If scraping failed, try simple fallback
-        if not result.get('success'):
-            print(f"[scraper] Browser scraping failed, trying simple HTTP fallback for {url}")
-            from .simple_scraper import scrape_url_simple
-            return await scrape_url_simple(url)
-        
-        return result
-    except (NotImplementedError, RuntimeError, OSError) as e:
-        # Windows Playwright issues - use simple fallback
-        print(f"[scraper] Playwright error ({type(e).__name__}), using simple HTTP fallback for {url}")
-        from .simple_scraper import scrape_url_simple
-        return await scrape_url_simple(url)
-    except Exception as e:
-        print(f"[scraper] Unexpected error: {e}, trying simple HTTP fallback for {url}")
-        from .simple_scraper import scrape_url_simple
-        return await scrape_url_simple(url)
+    last_result: Dict[str, Any] = {
+        'success': False,
+        'url': url,
+        'error': 'No scrape strategy executed',
+    }
+
+    for strategy in SCRAPE_STRATEGIES:
+        result = await strategy(url, headless)
+        if result.get('success'):
+            return result
+        last_result = result
+        print(f"[scraper] Strategy failed ({strategy.__name__}) for {url}: {result.get('error', 'unknown error')}")
+
+    return last_result
 
 
 async def scrape_urls(urls: List[str], headless: bool = True, delay: float = 1.0) -> Dict[str, Dict[str, Any]]:

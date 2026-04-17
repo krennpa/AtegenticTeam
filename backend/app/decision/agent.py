@@ -1,9 +1,6 @@
-import os
-from typing import List
 from datetime import datetime
 
 from langchain.tools import Tool
-from langchain_google_vertexai import ChatVertexAI
 from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from sqlmodel import Session
@@ -11,10 +8,8 @@ from sqlmodel import Session
 from .tools import RetrieveMenuMarkdownsTool, RetrieveNeedsTool
 from ..core.config import settings
 from .prompts import REASONING_PROMPT
+from .llm_factory import get_chat_model
 
-
-# The ChatVertexAI class will automatically use the GOOGLE_APPLICATION_CREDENTIALS
-# environment variable if it's set.
 
 # 1. Initialize LLM lazily to avoid startup failures without credentials
 _llm = None
@@ -23,11 +18,7 @@ def get_llm():
     """Get or initialize the LLM instance."""
     global _llm
     if _llm is None:
-        _llm = ChatVertexAI(
-            model_name="gemini-2.5-pro", 
-            temperature=0, 
-            project=settings.GOOGLE_CLOUD_PROJECT
-        )
+        _llm = get_chat_model()
     return _llm
 
 
@@ -179,7 +170,7 @@ Remember: Use retrieve_team_needs and retrieve_restaurant_menus tools to gather 
     # Final fallback: directly ping the LLM to verify connectivity (only if explicitly enabled via settings)
     if not final_response and bool(getattr(settings, "agent_test_fallback", False)):
         try:
-            ping = get_llm().invoke([("human", "Reply exactly: Gemini is connected")])
+            ping = get_llm().invoke([("human", "Reply exactly: model connectivity is healthy")])
             final_response = getattr(ping, "content", "") or ""
         except Exception:
             pass
