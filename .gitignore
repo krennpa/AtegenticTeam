@@ -1,0 +1,8 @@
+# ignore the .venv folder
+.venv
+.env
+venv-linux
+
+# node_modules folder in frontend folder
+**/node_modules/
+**/secrets/
