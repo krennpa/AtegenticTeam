@@ -133,7 +133,7 @@ def migrate_add_team_restaurants(db_path: str):
 
 if __name__ == "__main__":
     # Default database path
-    db_path = Path(__file__).parent.parent.parent / "data" / "dynalunch.db"
+    db_path = Path(__file__).parent.parent.parent / "data" / "umamimatch.db"
     
     if len(sys.argv) > 1:
         db_path = Path(sys.argv[1])

@@ -12,7 +12,7 @@ from app.decision.tools import RetrieveNeedsTool, RetrieveMenuMarkdownsTool
 from app.db.models import Team, TeamMembership, Restaurant
 
 # --- Test Configuration ---
-DATABASE_URL = "sqlite:///dynalunch.db"
+DATABASE_URL = "sqlite:///./data/umamimatch.db"
 
 # Provided existing records (from user's data)
 TEAM_ID = "40d39990-78a2-4a93-8593-cddd160f555d"

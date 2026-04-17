@@ -1,12 +1,17 @@
 import os
+from pathlib import Path
 from functools import lru_cache
-from pydantic_settings import BaseSettings
-from pydantic import Field
 from typing import List
+
+from pydantic import Field
+from pydantic_settings import BaseSettings
+
+
+ROOT_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 
 
 class Settings(BaseSettings):
-    APP_NAME: str = "Dynalunch API"
+    APP_NAME: str = "Umamimatch API"
     ENV: str = "local"
 
     # Security
@@ -23,8 +28,14 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
     ]
 
-    # Database (local SQLite by default)
-    DATABASE_URL: str = "sqlite:///./dynalunch.db"
+    # Database (local SQLite shared file for hackathon pairing)
+    DATABASE_URL: str = "sqlite:///./data/umamimatch.db"
+
+    # LLM provider selection (kept minimal for hackathon prep)
+    LLM_PROVIDER: str = Field(default="openai", description="LLM provider: openai | vertexai")
+    OPENAI_MODEL: str = Field(default="gpt-4o-mini", description="Default OpenAI chat model")
+    VERTEX_MODEL: str = Field(default="gemini-2.5-pro", description="Default Vertex chat model")
+    OPENAI_API_KEY: str | None = Field(default=None, description="OpenAI API key")
 
     # Google Cloud
     GOOGLE_CLOUD_PROJECT: str | None = Field(
@@ -40,7 +51,7 @@ class Settings(BaseSettings):
     )
 
     class Config:
-        env_file = ".env"
+        env_file = str(ROOT_ENV_FILE)
         case_sensitive = False
 
 
@@ -51,27 +62,22 @@ def get_settings() -> Settings:
 
 settings = get_settings()
 
-# --- GOOGLE CLOUD CREDENTIALS SETUP --- 
-creds_path = settings.GOOGLE_APPLICATION_CREDENTIALS
-print(f"[DEBUG] GOOGLE_APPLICATION_CREDENTIALS from settings: {creds_path}")
-if creds_path:
-    # Convert to absolute path if relative (for Windows local development)
-    if not os.path.isabs(creds_path):
-        # Get current working directory (should be backend/ when running uvicorn)
-        cwd = os.getcwd()
-        print(f"[DEBUG] Current working directory: {cwd}")
-        creds_path = os.path.abspath(os.path.join(cwd, creds_path))
-        print(f"[DEBUG] Converted relative path to absolute: {creds_path}")
-    
-    file_exists = os.path.exists(creds_path)
-    print(f"[DEBUG] Credentials file exists at {creds_path}: {file_exists}")
-    
-    if file_exists:
-        # Set the environment variable for Google Cloud libraries
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
-        print(f"[DEBUG] Set OS environment variable GOOGLE_APPLICATION_CREDENTIALS")
-    else:
-        print(f"[WARNING] Credentials file not found at {creds_path}")
-else:
-    print("[DEBUG] GOOGLE_APPLICATION_CREDENTIALS is not set - agent decision will fail")
-# --- END GOOGLE CLOUD CREDENTIALS SETUP ---
+def _resolve_google_credentials_path(creds_path: str | None) -> str | None:
+    if not creds_path:
+        return None
+    if os.path.isabs(creds_path):
+        return creds_path
+    return os.path.abspath(os.path.join(os.getcwd(), creds_path))
+
+
+def configure_provider_environment() -> None:
+    provider = (settings.LLM_PROVIDER or "").strip().lower()
+    if provider != "vertexai":
+        return
+
+    resolved_path = _resolve_google_credentials_path(settings.GOOGLE_APPLICATION_CREDENTIALS)
+    if resolved_path and os.path.exists(resolved_path):
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = resolved_path
+
+
+configure_provider_environment()

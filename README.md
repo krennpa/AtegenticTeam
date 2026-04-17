@@ -1,4 +1,4 @@
-# Dynalunch – Lunch Decision Web App
+# Umamimatch – Lunch Decision Web App
 
 A minimal end-to-end prototype to make group lunch decisions easier.
 
@@ -13,24 +13,9 @@ A minimal end-to-end prototype to make group lunch decisions easier.
 ### Dashboard
 ![Dashboard](docs/dashboard.png)
 
-## Quick Start (Docker - Recommended)
+## Quick Start (Local Development)
 
-**Prerequisites:** Docker Desktop or Docker Engine with Docker Compose
-
-```bash
-# 1. Clone and configure
-cp .env.example .env
-
-# 2. Build and run
-docker-compose up --build
-
-# 3. Access the application
-# Frontend: http://localhost:3000
-# Backend API: http://localhost:8000
-# API Docs: http://localhost:8000/docs
-```
-
-See [DOCKER.md](./DOCKER.md) for detailed Docker deployment guide.
+Use this workflow for hackathon pairing and a shared local SQLite file.
 
 ## Local Development (Windows)
 
@@ -39,16 +24,16 @@ See [DOCKER.md](./DOCKER.md) for detailed Docker deployment guide.
 - Node.js 18+ and npm
 - Windows PowerShell
 
-**Note:** Web scraping with Playwright has known issues on Windows. Docker deployment (Linux containers) is recommended for full functionality.
+**Note:** Web scraping with Playwright can be flaky on Windows; use WSL/Linux if you hit browser runtime issues.
 
 ## Backend – Local Run
 
 1) Create and activate a virtual environment
 
 ```powershell
-cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+cd backend
 ```
 
 2) Install dependencies
@@ -57,15 +42,32 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-3) (Optional) Configure environment
+3) Configure environment
 
-Create a `.env` in `backend/` if you want to override defaults:
+Copy the example file:
+
+```powershell
+cd ..
+Copy-Item .env.example .env
+cd backend
+```
+
+Default root `.env.example` values:
 
 ```env
-# backend/.env
+# .env (repository root)
 SECRET_KEY=change-me
-DATABASE_URL=sqlite:///./dynalunch.db
+DATABASE_URL=sqlite:///./data/umamimatch.db
 CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000"]
+
+# AI Provider Configuration
+LLM_PROVIDER=openai
+OPENAI_MODEL=gpt-4o-mini
+# OPENAI_API_KEY=your-openai-api-key
+
+# Vertex AI Configuration (optional when LLM_PROVIDER=vertexai)
+# GOOGLE_CLOUD_PROJECT=your-project-id
+# GOOGLE_APPLICATION_CREDENTIALS=app/secrets/your-credentials.json
 ```
 
 4) Start the API
@@ -77,7 +79,7 @@ uvicorn app.main:app --reload --port 8000
 - Health check: http://localhost:8000/health
 - OpenAPI docs: http://localhost:8000/docs
 
-Database will be created automatically (SQLite file in `backend/` working dir).
+Database will be created automatically at `backend/data/umamimatch.db`.
 
 ## Frontend – Local Run
 
@@ -153,5 +155,6 @@ Note: Some sites render menus dynamically. If scraping returns no items, we’ll
 ## Dev Tips
 
 - Run FastAPI in `backend/` so SQLite path resolves correctly.
-- If CORS errors occur, update `CORS_ORIGINS` in `backend/.env`.
+- Keep a single env file at repository root: `.env`.
+- If CORS errors occur, update `CORS_ORIGINS` in root `.env`.
 - If the decision result is empty, check `/restaurants/{id}/menu` to verify that scraping found items.
