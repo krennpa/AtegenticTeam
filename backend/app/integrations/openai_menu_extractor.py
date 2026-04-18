@@ -24,6 +24,10 @@ class OpenAIMenuExtractorGenericResultError(OpenAIMenuExtractorError):
     """Raised when OpenAI returns a generic, non-actionable menu result."""
 
 
+class OpenAIMenuExtractorStructureError(OpenAIMenuExtractorError):
+    """Raised when OpenAI drops required weekday structure from the source."""
+
+
 def _require_api_key() -> str:
     api_key = settings.OPENAI_API_KEY
     if not api_key:
@@ -83,6 +87,58 @@ def _normalize_string_list(value: Any) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+DAY_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
+    ("monday", (r"\bmonday\b", r"\bmontag\b", r"(?<![a-z])mo(?![a-z])")),
+    ("tuesday", (r"\btuesday\b", r"\bdienstag\b", r"(?<![a-z])di(?![a-z])", r"\btue\b")),
+    ("wednesday", (r"\bwednesday\b", r"\bmittwoch\b", r"(?<![a-z])mi(?![a-z])", r"\bwed\b")),
+    ("thursday", (r"\bthursday\b", r"\bdonnerstag\b", r"(?<![a-z])do(?![a-z])", r"\bthu\b")),
+    ("friday", (r"\bfriday\b", r"\bfreitag\b", r"(?<![a-z])fr(?![a-z])", r"\bfri\b")),
+    ("saturday", (r"\bsaturday\b", r"\bsamstag\b", r"(?<![a-z])sa(?![a-z])", r"\bsat\b")),
+    ("sunday", (r"\bsunday\b", r"\bsonntag\b", r"(?<![a-z])so(?![a-z])", r"\bsun\b")),
+]
+
+
+def _unique_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        normalized = value.strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
+def _detect_days_in_source(text: str) -> list[str]:
+    content = (text or "").strip().lower()
+    if not content:
+        return []
+
+    detected: list[str] = []
+    for day, patterns in DAY_PATTERNS:
+        if any(re.search(pattern, content) for pattern in patterns):
+            detected.append(day)
+    return detected
+
+
+def _build_structured_menu_text(
+    *,
+    day_sections: dict[str, list[str]],
+    static_menu_lines: list[str],
+) -> str:
+    parts: list[str] = []
+    for day, items in day_sections.items():
+        parts.append(f"{day.capitalize()}:")
+        parts.extend(f"- {item}" for item in items)
+    if static_menu_lines:
+        if parts:
+            parts.append("")
+        parts.append("Regular menu:")
+        parts.extend(f"- {item}" for item in static_menu_lines)
+    return "\n".join(parts).strip()
+
+
 GENERIC_SUMMARY_PATTERNS = [
     r"\bvariety of\b",
     r"\bselection of\b",
@@ -120,26 +176,54 @@ def normalize_menu_extraction(
     value: dict[str, Any],
     *,
     allow_generic: bool = False,
+    source_detected_days: list[str] | None = None,
 ) -> dict[str, Any]:
     menu_type = str(value.get("menu_type") or "unknown").strip().lower()
     if menu_type not in {"daily", "weekly", "static", "mixed", "unknown"}:
         menu_type = "unknown"
 
-    detected_days = _normalize_string_list(value.get("detected_days"))
+    detected_days = _unique_preserve_order(_normalize_string_list(value.get("detected_days")))
     day_sections = _normalize_day_sections(value.get("day_sections"))
     static_menu_lines = _normalize_string_list(value.get("static_menu_lines"))
+    source_detected_days = _unique_preserve_order(source_detected_days or [])
+
+    if source_detected_days and menu_type in {"daily", "weekly", "mixed"}:
+        detected_days = _unique_preserve_order(detected_days + source_detected_days)
+
     structured_menu_text = str(value.get("structured_menu_text") or "").strip()
+    rebuilt_structured_menu_text = _build_structured_menu_text(
+        day_sections=day_sections,
+        static_menu_lines=static_menu_lines,
+    )
+    if rebuilt_structured_menu_text:
+        structured_menu_text = rebuilt_structured_menu_text
+
     if not structured_menu_text:
-        parts: list[str] = []
-        for day, items in day_sections.items():
-            parts.append(f"{day.capitalize()}:")
-            parts.extend(f"- {item}" for item in items)
-        if static_menu_lines:
-            if parts:
-                parts.append("")
-            parts.append("Regular menu:")
-            parts.extend(f"- {item}" for item in static_menu_lines)
-        structured_menu_text = "\n".join(parts).strip()
+        structured_menu_text = rebuilt_structured_menu_text
+
+    if source_detected_days:
+        matched_days = [day for day in source_detected_days if day in day_sections]
+        missing_days = [day for day in source_detected_days if day not in day_sections]
+        if menu_type == "static" and not day_sections:
+            raise OpenAIMenuExtractorStructureError(
+                "OpenAI menu extraction dropped visible weekday structure and mislabeled the source as static"
+            )
+        if menu_type in {"daily", "weekly", "mixed"} and not day_sections:
+            raise OpenAIMenuExtractorStructureError(
+                "OpenAI menu extraction did not preserve weekday sections from the source"
+            )
+        if len(source_detected_days) >= 2 and len(matched_days) < min(2, len(source_detected_days)):
+            raise OpenAIMenuExtractorStructureError(
+                "OpenAI menu extraction did not map visible weekday headings into day_sections"
+            )
+        if menu_type == "weekly" and missing_days and len(matched_days) < len(source_detected_days) - 1:
+            raise OpenAIMenuExtractorStructureError(
+                "OpenAI menu extraction preserved too few weekday sections for a weekly menu"
+            )
+    elif menu_type == "weekly" and detected_days and not day_sections:
+        raise OpenAIMenuExtractorStructureError(
+            "OpenAI menu extraction labeled the source as weekly but did not provide day_sections"
+        )
 
     if not allow_generic and _looks_too_generic(
         structured_menu_text=structured_menu_text,
@@ -218,7 +302,11 @@ async def _request_menu_extraction(
         raise OpenAIMenuExtractorError("OpenAI menu extraction returned no text output")
 
     parsed = _extract_json_object(output_text)
-    return normalize_menu_extraction(parsed, allow_generic=allow_generic)
+    return normalize_menu_extraction(
+        parsed,
+        allow_generic=allow_generic,
+        source_detected_days=_detect_days_in_source(scraped_text),
+    )
 
 
 async def extract_menu_with_openai(
@@ -251,10 +339,13 @@ Return exactly one JSON object with this shape:
 
 Rules:
 - Focus only on actual menu items.
-- If the source is a weekly lunch menu or daily lunch menut, populate day_sections by day. NEVER SKIP DAY INFORMATION.
+- If the source is a weekly lunch menu or daily lunch menu, populate day_sections by day. NEVER SKIP DAY INFORMATION.
 - If the source is regular menu, set menu_type to "static" and populate static_menu_lines.
 - If both daily/weekly specials and a regular menu exist, set menu_type to "mixed".
 - structured_menu_text must list actual menu items line by line.
+- If weekday headings are visible in the source, detected_days and day_sections must preserve them explicitly.
+- Do not flatten Monday/Tuesday/etc. into one undifferentiated list.
+- When day_sections is present, structured_menu_text must be grouped under weekday headings in the same order.
 - Include prices directly in item lines whenever a price is visible.
 - Prefer the exact visible wording from the source over paraphrases.
 - Avoid vague summaries like "variety of soups, salads, main dishes, and desserts".
@@ -271,16 +362,18 @@ Rules:
             pdf_urls=pdf_urls,
             allow_generic=False,
         )
-    except OpenAIMenuExtractorGenericResultError:
+    except (OpenAIMenuExtractorGenericResultError, OpenAIMenuExtractorStructureError):
         retry_prompt = base_prompt + """
 
-Your previous extraction was too generic.
+Your previous extraction was not specific enough or it dropped weekday structure.
 Retry now and be materially more specific:
 - extract actual visible dish names
 - include at least 3 concrete examples when the source provides them
 - include prices when visible
 - do not summarize only categories
 - prefer imperfect concrete dish examples over broad menu category descriptions
+- if weekday labels exist, map dishes to those exact weekdays in day_sections
+- never return a flattened weekly list when weekday headings are visible
 """.strip()
         return await _request_menu_extraction(
             prompt=retry_prompt,
