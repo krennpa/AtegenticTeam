@@ -1,6 +1,6 @@
 'use client'
 
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createApiClient } from './api'
 
@@ -29,7 +29,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (u) setUser(JSON.parse(u))
   }, [])
 
-  const api = useMemo(() => createApiClient(() => token), [token])
+  const clearStoredAuth = useCallback(() => {
+    setToken(null)
+    setUser(null)
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem('auth_token')
+      window.localStorage.removeItem('auth_user')
+    }
+  }, [])
+
+  const handleUnauthorized = useCallback(() => {
+    clearStoredAuth()
+    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/auth/')) {
+      router.replace('/auth/login')
+    }
+  }, [clearStoredAuth, router])
+
+  const api = useMemo(
+    () => createApiClient(() => token, handleUnauthorized),
+    [token, handleUnauthorized]
+  )
 
   async function login(email: string, password: string) {
     const res = await api.post<{ user: User; token: string }>('/auth/login', { email, password })
@@ -50,10 +69,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   function logout() {
-    setToken(null)
-    setUser(null)
-    window.localStorage.removeItem('auth_token')
-    window.localStorage.removeItem('auth_user')
+    clearStoredAuth()
     router.push('/')
   }
 

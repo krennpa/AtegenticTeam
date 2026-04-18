@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = str(ROOT_ENV_FILE)
         case_sensitive = False
+        extra = "ignore"
 
 
 @lru_cache()

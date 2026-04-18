@@ -1,3 +1,5 @@
+export type BudgetPreference = 'low' | 'medium' | 'high'
+
 export interface User {
   id: string
   email: string
@@ -8,10 +10,91 @@ export interface Profile {
   id: string
   userId: string
   displayName?: string
-  budgetPreference: 'low' | 'medium' | 'high'
+  budgetPreference: BudgetPreference
   allergies: string[]
   dietaryRestrictions: string[]
   otherPreferences: Record<string, any>
+}
+
+export type PreferenceEventType = 'this_or_that' | 'choice' | 'slider' | 'mood_pick' | 'veto_card'
+
+export interface ProfilePreferenceEventCreate {
+  eventType: PreferenceEventType
+  questionKey: string
+  answer: unknown
+  weight?: number
+  source?: string
+  teamId?: string
+}
+
+export interface ProfilePreferenceEvent {
+  id: string
+  userId: string
+  teamId?: string | null
+  eventType: PreferenceEventType
+  questionKey: string
+  answer: unknown
+  weight: number
+  source: string
+  createdAt: string
+}
+
+export interface ProfilePreferenceProgress {
+  totalEvents: number
+  points: number
+  level: number
+  completionPercent: number
+  lastEventAt?: string | null
+  coveredAreas: string[]
+  suggestedNextAreas: string[]
+}
+
+export interface PreferenceQuestionOption {
+  label: string
+  value: string
+}
+
+export interface PreferenceQuestion {
+  questionKey: string
+  eventType: PreferenceEventType
+  area: string
+  prompt: string
+  options: PreferenceQuestionOption[]
+}
+
+export interface PreferenceQuestionCatalogResponse {
+  recommendedAreas: string[]
+  questions: PreferenceQuestion[]
+}
+
+export interface TeamPreferenceSignal {
+  value: string
+  support: number
+  memberCount: number
+}
+
+export interface TeamPreferenceOtherPreferences {
+  signals?: Record<string, TeamPreferenceSignal>
+  dislikes?: string[]
+  recentMoods?: string[]
+  areasSeen?: string[]
+  aggregation?: {
+    profileCount: number
+    updatedAt: string
+  }
+  [key: string]: unknown
+}
+
+export interface TeamPreferenceSnapshot {
+  id: string
+  teamId: string
+  budgetPreference: BudgetPreference
+  allergies: string[]
+  dietaryRestrictions: string[]
+  otherPreferences: TeamPreferenceOtherPreferences
+  memberCount: number
+  createdAt: string
+  updatedAt: string
 }
 
 export interface Team {

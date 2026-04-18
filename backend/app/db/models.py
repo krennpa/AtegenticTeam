@@ -75,6 +75,47 @@ class Profile(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class TeamPreference(SQLModel, table=True):
+    __tablename__ = "team_preferences"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    team_id: str = Field(foreign_key="teams.id", index=True, unique=True)
+
+    budget_preference: BudgetPreference = Field(default=BudgetPreference.medium)
+    allergies: List[str] = Field(
+        default_factory=list,
+        sa_column=Column(SQLITE_JSON),
+    )
+    dietary_restrictions: List[str] = Field(
+        default_factory=list,
+        sa_column=Column(SQLITE_JSON),
+    )
+    other_preferences: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(SQLITE_JSON),
+    )
+    member_count: int = Field(default=0)
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ProfilePreferenceEvent(SQLModel, table=True):
+    __tablename__ = "profile_preference_events"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    user_id: str = Field(foreign_key="users.id", index=True)
+    team_id: Optional[str] = Field(foreign_key="teams.id", index=True, default=None)
+
+    event_type: str = Field(index=True)
+    question_key: str = Field(index=True)
+    answer: Any = Field(default=None, sa_column=Column(SQLITE_JSON))
+    weight: float = Field(default=1.0)
+    source: str = Field(default="user_gameplay", index=True)
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class Restaurant(SQLModel, table=True):
     __tablename__ = "restaurants"
 

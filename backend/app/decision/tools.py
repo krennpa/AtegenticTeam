@@ -3,7 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from ..db.models import Team, TeamMembership, Profile, Restaurant, RestaurantDocument
+from ..db.models import Team, TeamMembership, Profile, TeamPreference, Restaurant, RestaurantDocument
 from ..api.deps import get_db_session
 
 # Pydantic models for tool inputs
@@ -30,6 +30,24 @@ class RetrieveNeedsTool(BaseDBTool):
         team = self.db.exec(select(Team).where(Team.id == team_id)).first()
         if not team:
             return {"error": "Team not found."}
+
+        team_preference = self.db.exec(
+            select(TeamPreference).where(TeamPreference.team_id == team_id)
+        ).first()
+        if team_preference:
+            other_preferences = []
+            for key, value in (team_preference.other_preferences or {}).items():
+                if value:
+                    other_preferences.append(f"{key}: {value}")
+            return {
+                "team_id": team_id,
+                "team_name": team.name,
+                "member_count": team_preference.member_count,
+                "budgets": [team_preference.budget_preference.value],
+                "allergies": team_preference.allergies,
+                "dietary_restrictions": team_preference.dietary_restrictions,
+                "other_preferences": other_preferences,
+            }
 
         memberships = self.db.exec(
             select(TeamMembership).where(
