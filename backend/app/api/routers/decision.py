@@ -995,6 +995,8 @@ async def get_existing_restaurants(
                 url=restaurant.url,
                 display_name=display_name,
                 formatted_address=google_maps.get("formatted_address"),
+                location_lat=restaurant_lat,
+                location_lng=restaurant_lng,
                 straight_line_distance_km=distance_km,
                 last_scraped_at=team_restaurant.last_scraped_at.isoformat() if team_restaurant.last_scraped_at else None,
                 menu_type=doc.meta.get('menu_type', 'unknown') if doc.meta else 'unknown',
@@ -1135,6 +1137,8 @@ async def discover_restaurants(
         return {
             "display_name": google_maps.get("display_name") or "Unknown restaurant",
             "formatted_address": google_maps.get("formatted_address"),
+            "location_lat": lat,
+            "location_lng": lng,
             "website_uri": google_maps.get("website_uri"),
             "maps_uri": google_maps.get("maps_uri"),
             "primary_type": google_maps.get("primary_type"),

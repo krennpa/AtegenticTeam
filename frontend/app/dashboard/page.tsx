@@ -1,15 +1,15 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { useAuth } from '../../lib/auth-context'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../components/ui/card'
 import { Button } from '../../components/ui/button'
-import { Users, Plus, ArrowRight, Sparkles, MapPin } from 'lucide-react'
+import { Users, Plus, Sparkles, MapPin } from 'lucide-react'
 import { Team, DecisionRun } from '../../lib/types'
 import { DashboardPreferencePrompt } from '../../components/forms/DashboardPreferencePrompt'
-import { TeamBaseReadinessCard } from '../../components/forms/TeamBaseReadinessCard'
-import { BaseStatusBadge } from '../../components/ui/base-status-badge'
+import { TeamRestaurantMap } from '../../components/maps/TeamRestaurantMap'
 
 function extractRestaurantName(decision: DecisionRun): string {
   const name = decision.result?.recommendationRestaurantName
@@ -33,6 +33,7 @@ function extractRestaurantName(decision: DecisionRun): string {
 
 export default function DashboardPage() {
   const { user, api } = useAuth()
+  const router = useRouter()
   const [teams, setTeams] = useState<Team[]>([])
   const [decisions, setDecisions] = useState<DecisionRun[]>([])
   const [loadingTeams, setLoadingTeams] = useState(true)
@@ -53,6 +54,24 @@ export default function DashboardPage() {
     void fetchTeams()
   }, [api])
 
+  const dashboardMapPoints = useMemo(
+    () =>
+      teams
+        .filter((team) => typeof team.locationLat === 'number' && typeof team.locationLng === 'number')
+        .map((team) => ({
+          id: `team-${team.id}`,
+          name: team.name,
+          lat: team.locationLat as number,
+          lng: team.locationLng as number,
+          address: team.location,
+        })),
+    [teams],
+  )
+  const teamsWithBase = useMemo(
+    () => teams.filter((team) => Boolean(team.location && team.location.trim())).length,
+    [teams],
+  )
+
   useEffect(() => {
     const fetchDecisions = async () => {
       try {
@@ -70,52 +89,44 @@ export default function DashboardPage() {
 
   return (
     <main className="mx-auto max-w-6xl space-y-4">
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.35fr)]">
-        <Card>
-          <CardHeader className="pb-3">
+      <section className="grid gap-4 xl:grid-cols-2">
+        <DashboardPreferencePrompt />
+
+        <Card className="xl:min-h-[15rem]">
+          <CardHeader className="pb-2">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <CardTitle>Welcome{user?.displayName ? `, ${user.displayName}` : ''}</CardTitle>
-                <CardDescription>Quick actions to keep your team signals and bases ready.</CardDescription>
-              </div>
-              <div className="space-y-1 text-right">
-                <p className="text-xs uppercase tracking-wide text-slate-400">Overview</p>
-                <p className="text-sm text-slate-700">{loadingTeams ? '...' : teams.length} teams</p>
-                <p className="text-sm text-slate-700">
-                  {loadingDecisions ? '...' : decisions.length} recent decisions
-                </p>
+                <CardDescription>Quick overview for your current lunch coordination.</CardDescription>
               </div>
             </div>
           </CardHeader>
           <CardContent className="pt-0">
-            <div className="flex flex-wrap gap-2">
-              <Link href="/teams">
-                <Button size="sm" className="rounded-lg bg-[#3a8aca] hover:bg-[#3a8aca]/90">
-                  <Plus className="mr-2 h-4 w-4" />
-                  Create Team
-                </Button>
-              </Link>
-              <Link href="/preferences">
-                <Button size="sm" variant="outline" className="rounded-lg">
-                  Keep Preferences Fresh
-                </Button>
-              </Link>
+            <div className="grid gap-2 sm:grid-cols-3">
+              <div className="rounded-lg border bg-slate-50 px-3 py-2">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Teams</p>
+                <p className="text-lg font-semibold text-slate-900">{loadingTeams ? '...' : teams.length}</p>
+              </div>
+              <div className="rounded-lg border bg-slate-50 px-3 py-2">
+                <p className="text-xs uppercase tracking-wide text-slate-500">With Base</p>
+                <p className="text-lg font-semibold text-slate-900">{loadingTeams ? '...' : teamsWithBase}</p>
+              </div>
+              <div className="rounded-lg border bg-slate-50 px-3 py-2">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Recent Decisions</p>
+                <p className="text-lg font-semibold text-slate-900">{loadingDecisions ? '...' : decisions.length}</p>
+              </div>
             </div>
           </CardContent>
         </Card>
-
-        <DashboardPreferencePrompt />
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-2">
-        <TeamBaseReadinessCard teams={teams} loading={loadingTeams} />
-
+      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
         <Card className="xl:min-h-[24rem]">
           <CardHeader className="pb-3">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3">
               <div>
-                <CardTitle>Teams</CardTitle>
-                <CardDescription>Your lunch groups</CardDescription>
+                <CardTitle>Team Bases Map</CardTitle>
+                <CardDescription>Open teams directly from the map and keep location context in one place.</CardDescription>
               </div>
               <Link href="/teams">
                 <Button size="sm" className="rounded-lg bg-[#3a8aca] hover:bg-[#3a8aca]/90">
@@ -126,37 +137,15 @@ export default function DashboardPage() {
             </div>
           </CardHeader>
           <CardContent className="pt-0">
-            {loadingTeams ? (
-              <p className="text-sm text-slate-500">Loading teams...</p>
-            ) : teams.length > 0 ? (
-              <div className="max-h-[18rem] space-y-2 overflow-y-auto pr-1">
-                {teams.map((team) => (
-                  <Link key={team.id} href={`/teams/${team.id}`}>
-                    <div className="cursor-pointer rounded-lg border p-3 transition-all hover:border-[#3a8aca] hover:bg-slate-50">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#3a8aca]/10">
-                            <Users className="h-4 w-4 text-[#3a8aca]" />
-                          </div>
-                          <div>
-                            <h3 className="font-medium text-slate-900">{team.name}</h3>
-                            <div className="mt-1 flex items-center gap-2">
-                              <p className="text-sm text-slate-500">
-                                {team.memberCount} {team.memberCount === 1 ? 'member' : 'members'}
-                              </p>
-                              <BaseStatusBadge hasBase={Boolean(team.location && team.location.trim())} compact />
-                            </div>
-                          </div>
-                        </div>
-                        <ArrowRight className="h-4 w-4 text-slate-400" />
-                      </div>
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-slate-500">You have not joined any teams yet.</p>
-            )}
+            <TeamRestaurantMap
+              restaurants={dashboardMapPoints}
+              mapHeightClassName="h-[320px]"
+              emptyMessage="No teams have map-ready coordinates yet. Add a specific location to a team base first."
+              onSelectRestaurant={(id) => {
+                const teamId = id.replace('team-', '')
+                router.push(`/teams/${teamId}`)
+              }}
+            />
           </CardContent>
         </Card>
 

@@ -7,6 +7,23 @@ from sqlmodel import SQLModel, Session, create_engine
 from ..core.config import settings
 
 
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+
+
+def _resolve_database_url(database_url: str) -> str:
+    if not database_url.startswith("sqlite:///"):
+        return database_url
+
+    sqlite_path = database_url.replace("sqlite:///", "", 1)
+    if sqlite_path == ":memory:":
+        return database_url
+
+    db_file = Path(sqlite_path)
+    if not db_file.is_absolute():
+        db_file = (BACKEND_DIR / db_file).resolve()
+    return f"sqlite:///{db_file.as_posix()}"
+
+
 def _ensure_sqlite_directory(database_url: str) -> None:
     if not database_url.startswith("sqlite:///"):
         return
@@ -21,10 +38,12 @@ def _ensure_sqlite_directory(database_url: str) -> None:
     db_file.parent.mkdir(parents=True, exist_ok=True)
 
 
+RESOLVED_DATABASE_URL = _resolve_database_url(settings.DATABASE_URL)
+
 # SQLite needs check_same_thread=False for multi-threaded FastAPI
-_ensure_sqlite_directory(settings.DATABASE_URL)
-connect_args = {"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(settings.DATABASE_URL, echo=False, connect_args=connect_args)
+_ensure_sqlite_directory(RESOLVED_DATABASE_URL)
+connect_args = {"check_same_thread": False} if RESOLVED_DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(RESOLVED_DATABASE_URL, echo=False, connect_args=connect_args)
 
 
 def get_session() -> Generator[Session, None, None]:
@@ -85,4 +104,4 @@ def create_db_and_tables() -> None:
     from . import models  # ensure models are imported for metadata
 
     SQLModel.metadata.create_all(engine)
-    _apply_sqlite_schema_updates(settings.DATABASE_URL)
+    _apply_sqlite_schema_updates(RESOLVED_DATABASE_URL)
