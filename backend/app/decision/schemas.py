@@ -50,6 +50,8 @@ class ExistingRestaurant(CamelModel):
     url: str
     display_name: Optional[str] = None
     formatted_address: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
     straight_line_distance_km: Optional[float] = None
     last_scraped_at: Optional[str] = None
     menu_type: Optional[str] = None
@@ -72,6 +74,8 @@ class DiscoverRestaurantsRequest(CamelModel):
 class DiscoveredRestaurant(CamelModel):
     display_name: str
     formatted_address: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
     website_uri: Optional[str] = None
     maps_uri: Optional[str] = None
     primary_type: Optional[str] = None

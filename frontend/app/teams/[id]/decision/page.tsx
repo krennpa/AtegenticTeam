@@ -2,7 +2,16 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useAuth } from '../../../../lib/auth-context'
-import { TeamWithMembers, AgentDecisionResponse, IngestRestaurantInput, IngestRestaurantsResponse, ExistingRestaurantsResponse, RestaurantDocument, DiscoverRestaurantsResponse } from '../../../../lib/types'
+import {
+  TeamWithMembers,
+  AgentDecisionResponse,
+  IngestRestaurantInput,
+  IngestRestaurantsResponse,
+  ExistingRestaurantsResponse,
+  RestaurantDocument,
+  DiscoverRestaurantsResponse,
+  DiscoveredRestaurant,
+} from '../../../../lib/types'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../../../components/ui/card'
@@ -16,8 +25,58 @@ import { BaseStatusBadge } from '../../../../components/ui/base-status-badge'
 import { DistanceBadge } from '../../../../components/ui/distance-badge'
 import { FreshnessBadge } from '../../../../components/ui/freshness-badge'
 import { PrivacyCallout } from '../../../../components/ui/privacy-callout'
+import { TeamRestaurantMap } from '../../../../components/maps/TeamRestaurantMap'
 
 type RestaurantSort = 'default' | 'nearest' | 'freshest'
+type AgentRunStage = 'idle' | 'discovering' | 'shortlisting' | 'ingesting' | 'reasoning' | 'done' | 'error'
+
+type PromptPreset = {
+  id: string
+  label: string
+  question: string
+}
+
+type AgentActivity = {
+  id: number
+  title: string
+  detail?: string
+}
+
+const PROMPT_PRESETS: PromptPreset[] = [
+  {
+    id: 'balanced',
+    label: 'Balanced',
+    question: 'Use your tools to retrieve masked team needs and menus. Recommend one restaurant and one dish with clear reasoning.',
+  },
+  {
+    id: 'fast',
+    label: 'Fast Lunch',
+    question: 'Prioritize speed and convenience for today while still fitting masked team needs. Recommend one restaurant and one dish.',
+  },
+  {
+    id: 'healthy',
+    label: 'Healthy Focus',
+    question: 'Prioritize healthy and dietary-fit options from available menus while respecting masked team preferences. Recommend one restaurant and one dish.',
+  },
+  {
+    id: 'budget',
+    label: 'Budget Safe',
+    question: 'Prioritize value-for-money choices aligned with team budget profile and masked needs. Recommend one restaurant and one dish.',
+  },
+]
+
+const DISCOVERY_RADIUS_METERS = 1500
+
+function prettifyPreferenceToken(value: string): string {
+  return value
+    .replace(/[_:]/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+function scoreWeight(score: number): number {
+  const safe = Number.isFinite(score) ? Math.max(0, Math.min(score, 30)) : 0
+  return Math.round((safe / 30) * 100)
+}
 
 export default function TeamDecisionPage() {
   const { api, user } = useAuth()
@@ -30,6 +89,8 @@ export default function TeamDecisionPage() {
   const [error, setError] = useState<string | null>(null)
   const [existingRestaurants, setExistingRestaurants] = useState<ExistingRestaurantsResponse | null>(null)
   const [discoveryResult, setDiscoveryResult] = useState<DiscoverRestaurantsResponse | null>(null)
+  const [selectedDiscoveryUrls, setSelectedDiscoveryUrls] = useState<Set<string>>(new Set())
+  const [selectedMapRestaurantId, setSelectedMapRestaurantId] = useState<string | null>(null)
   const [discoveryLoading, setDiscoveryLoading] = useState(false)
   const [discoveryError, setDiscoveryError] = useState<string | null>(null)
   // Processing state (for data fetching/scraping)
@@ -51,6 +112,12 @@ export default function TeamDecisionPage() {
   const [rescrapingIds, setRescrapingIds] = useState<Set<string>>(new Set())
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set())
   const [restaurantSort, setRestaurantSort] = useState<RestaurantSort>('default')
+  const [isExistingDataOpen, setIsExistingDataOpen] = useState(false)
+  const [isAddRefreshOpen, setIsAddRefreshOpen] = useState(false)
+  const [selectedPresetId, setSelectedPresetId] = useState<string>(PROMPT_PRESETS[0].id)
+  const [agentRunStage, setAgentRunStage] = useState<AgentRunStage>('idle')
+  const [agentActivities, setAgentActivities] = useState<AgentActivity[]>([])
+  const [agentAutoRunning, setAgentAutoRunning] = useState(false)
 
   useEffect(() => {
     if (api && teamId) {
@@ -58,6 +125,10 @@ export default function TeamDecisionPage() {
       loadExistingRestaurants()
     }
   }, [api, teamId])
+
+  const addAgentActivity = (title: string, detail?: string) => {
+    setAgentActivities((prev) => [...prev, { id: Date.now() + prev.length, title, detail }])
+  }
 
   const loadTeam = async () => {
     try {
@@ -165,8 +236,43 @@ export default function TeamDecisionPage() {
     setProcessResult(null)
     setProcessError(null)
     setAgentError(null)
+    setAgentRunStage('idle')
+    setAgentActivities([])
     setRestaurants([{ url: '', name: '' }])
   }
+
+  const getDiscoveryRestaurantUrl = (restaurant: DiscoveredRestaurant): string | null =>
+    restaurant.websiteUri || restaurant.mapsUri || null
+
+  const getDiscoveredMapCardId = (restaurant: DiscoveredRestaurant, index: number) => {
+    if (restaurant.existingRestaurantId) {
+      return `discovered-existing-${restaurant.existingRestaurantId}`
+    }
+    const base = `${restaurant.displayName}-${restaurant.formattedAddress ?? index}`
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+    return `discovered-${base}-${index}`
+  }
+
+  const getExistingMapCardId = (restaurantId: string) => `existing-${restaurantId}`
+
+  const toggleDiscoverySelection = (restaurant: DiscoveredRestaurant) => {
+    const restaurantUrl = getDiscoveryRestaurantUrl(restaurant)
+    if (!restaurantUrl) return
+    setSelectedDiscoveryUrls((prev) => {
+      const next = new Set(prev)
+      if (next.has(restaurantUrl)) {
+        next.delete(restaurantUrl)
+      } else {
+        next.add(restaurantUrl)
+      }
+      return next
+    })
+  }
+
+  const currentPromptQuestion =
+    PROMPT_PRESETS.find((preset) => preset.id === selectedPresetId)?.question ?? PROMPT_PRESETS[0].question
 
   const handleProcessInformation = async (e: React.MouseEvent) => {
     e.preventDefault()
@@ -235,16 +341,22 @@ export default function TeamDecisionPage() {
       setAgentDeciding(true)
       setAgentError(null)
       setAgentResult(null)
+      setAgentRunStage('reasoning')
+      addAgentActivity('Reading masked team needs')
+      addAgentActivity('Evaluating available menus and fit signals')
 
       // Run agent with the restaurant IDs
       const result = await api.post<AgentDecisionResponse>('/decision/agent-decision', {
         teamId: teamId,
         restaurantIds: restaurantIds,
-        userQuestion: 'Use your tools to retrieve team needs and the restaurant menu. Recommend one restaurant and one dish.'
+        userQuestion: currentPromptQuestion,
       })
       setAgentResult(result)
+      setAgentRunStage('done')
+      addAgentActivity('Final recommendation ready')
     } catch (err) {
       setAgentError(err instanceof Error ? err.message : 'Failed to run agent decision')
+      setAgentRunStage('error')
     } finally {
       setAgentDeciding(false)
     }
@@ -253,6 +365,16 @@ export default function TeamDecisionPage() {
   const hasTeamBase = Boolean(team?.location && team.location.trim())
   const hasDistanceReadyBase =
     typeof team?.locationLat === 'number' && typeof team?.locationLng === 'number'
+  const isAgentBusy = agentDeciding || agentAutoRunning
+  const agentStageLabel = ({
+    idle: 'Idle',
+    discovering: 'Discovering',
+    shortlisting: 'Shortlisting',
+    ingesting: 'Ingesting',
+    reasoning: 'Reasoning',
+    done: 'Completed',
+    error: 'Error',
+  } as Record<AgentRunStage, string>)[agentRunStage]
 
   const sortedRestaurants = useMemo(() => {
     const source = existingRestaurants?.restaurants ?? []
@@ -279,6 +401,55 @@ export default function TeamDecisionPage() {
     return source
   }, [existingRestaurants, restaurantSort])
 
+  const mapRestaurants = useMemo(() => {
+    if (discoveryResult?.results?.length) {
+      return discoveryResult.results
+        .map((restaurant, index) => {
+          if (typeof restaurant.locationLat !== 'number' || typeof restaurant.locationLng !== 'number') {
+            return null
+          }
+          return {
+            id: getDiscoveredMapCardId(restaurant, index),
+            name: restaurant.displayName,
+            lat: restaurant.locationLat,
+            lng: restaurant.locationLng,
+            address: restaurant.formattedAddress,
+            score: restaurant.compatibilityScore,
+            distanceKm: restaurant.straightLineDistanceKm ?? null,
+            mapsUri: restaurant.mapsUri ?? null,
+            isTopPick: index === 0,
+          }
+        })
+        .filter((restaurant): restaurant is NonNullable<typeof restaurant> => Boolean(restaurant))
+    }
+
+    return sortedRestaurants
+      .map((restaurant) => {
+        if (typeof restaurant.locationLat !== 'number' || typeof restaurant.locationLng !== 'number') {
+          return null
+        }
+        return {
+          id: getExistingMapCardId(restaurant.id),
+          name: restaurant.displayName || restaurant.url,
+          lat: restaurant.locationLat,
+          lng: restaurant.locationLng,
+          address: restaurant.formattedAddress,
+          distanceKm: restaurant.straightLineDistanceKm ?? null,
+          mapsUri: null,
+          isTopPick: false,
+        }
+      })
+      .filter((restaurant): restaurant is NonNullable<typeof restaurant> => Boolean(restaurant))
+  }, [discoveryResult, sortedRestaurants])
+
+  const handleSelectMapRestaurant = (restaurantId: string) => {
+    setSelectedMapRestaurantId(restaurantId)
+    const target = document.getElementById(`restaurant-card-${restaurantId}`)
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }
+
   const handleDiscoverRestaurants = async (e: React.MouseEvent) => {
     e.preventDefault()
     if (!api || !team) return
@@ -293,7 +464,7 @@ export default function TeamDecisionPage() {
       setDiscoveryError(null)
       const result = await api.post<DiscoverRestaurantsResponse>('/decision/discover-restaurants', {
         teamId,
-        radiusMeters: 1500,
+        radiusMeters: DISCOVERY_RADIUS_METERS,
         candidateLimit: 15,
         resultLimit: 5,
       })
@@ -302,6 +473,111 @@ export default function TeamDecisionPage() {
       setDiscoveryError(err instanceof Error ? err.message : 'Failed to discover restaurants')
     } finally {
       setDiscoveryLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!discoveryResult || discoveryResult.results.length === 0) return
+    const defaults = discoveryResult.results
+      .map((restaurant) => restaurant.websiteUri || restaurant.mapsUri || null)
+      .filter((url): url is string => Boolean(url))
+      .slice(0, 3)
+    setSelectedDiscoveryUrls(new Set(defaults))
+  }, [discoveryResult])
+
+  useEffect(() => {
+    if (!mapRestaurants.length) {
+      setSelectedMapRestaurantId(null)
+      return
+    }
+
+    if (!selectedMapRestaurantId || !mapRestaurants.some((restaurant) => restaurant.id === selectedMapRestaurantId)) {
+      setSelectedMapRestaurantId(mapRestaurants[0].id)
+    }
+  }, [mapRestaurants, selectedMapRestaurantId])
+
+  const handleRunAgentSession = async () => {
+    if (!api || !team) return
+
+    setAgentError(null)
+    setDiscoveryError(null)
+    setAgentResult(null)
+    setAgentActivities([])
+    setAgentAutoRunning(true)
+
+    try {
+      let discovered: DiscoverRestaurantsResponse | null = discoveryResult
+      let restaurantIds: string[] = []
+
+      if (team.locationLat != null && team.locationLng != null) {
+        setAgentRunStage('discovering')
+        addAgentActivity('Finding nearby candidates')
+        discovered = await api.post<DiscoverRestaurantsResponse>('/decision/discover-restaurants', {
+          teamId,
+          radiusMeters: DISCOVERY_RADIUS_METERS,
+          candidateLimit: 15,
+          resultLimit: 5,
+        })
+        setDiscoveryResult(discovered)
+
+        const selectedUrls = Array.from(selectedDiscoveryUrls)
+        const fallbackUrls = discovered.results
+          .map((restaurant) => getDiscoveryRestaurantUrl(restaurant))
+          .filter((url): url is string => Boolean(url))
+          .slice(0, 3)
+        setAgentRunStage('shortlisting')
+        addAgentActivity('Building shortlist from compatibility ranking')
+
+        const urlsToIngest = (selectedUrls.length > 0 ? selectedUrls : fallbackUrls).map((url) => ({
+          url,
+          name: discovered?.results.find((result) => (result.websiteUri || result.mapsUri) === url)?.displayName,
+        }))
+
+        if (urlsToIngest.length > 0) {
+          setAgentRunStage('ingesting')
+          addAgentActivity('Refreshing menu evidence for shortlist')
+          const ingestResult = await api.post<IngestRestaurantsResponse>('/decision/ingest-restaurants', {
+            teamId,
+            restaurants: urlsToIngest,
+            forceRescrape,
+          })
+          setProcessResult(ingestResult)
+          restaurantIds = ingestResult.restaurantIds
+          await loadExistingRestaurants()
+        }
+      } else {
+        addAgentActivity('Skipping discovery: team base coordinates missing')
+      }
+
+      if (restaurantIds.length === 0) {
+        const fallbackProcessed = processResult?.restaurantIds ?? []
+        const fallbackExisting = existingRestaurants?.restaurants
+          .filter((restaurant) => restaurant.hasContent)
+          .map((restaurant) => restaurant.id) ?? []
+        restaurantIds = fallbackProcessed.length > 0 ? fallbackProcessed : fallbackExisting
+      }
+
+      if (restaurantIds.length === 0) {
+        throw new Error('No restaurant data available. Add menu URLs or discover restaurants first.')
+      }
+
+      setAgentRunStage('reasoning')
+      addAgentActivity('Reasoning over masked team profile and menu context')
+      const decision = await api.post<AgentDecisionResponse>('/decision/agent-decision', {
+        teamId,
+        restaurantIds,
+        userQuestion: currentPromptQuestion,
+      })
+      setAgentResult(decision)
+      setAgentRunStage('done')
+      addAgentActivity('Decision completed')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to complete agent run'
+      setAgentError(message)
+      setAgentRunStage('error')
+      addAgentActivity('Run failed', message)
+    } finally {
+      setAgentAutoRunning(false)
     }
   }
 
@@ -346,7 +622,7 @@ export default function TeamDecisionPage() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto p-6 space-y-6">
+    <div className="max-w-7xl mx-auto p-6 space-y-6">
       <div className="mb-6">
         <h1 className="text-3xl font-bold text-slate-900 mb-2">
           Team Decision: {team.name}
@@ -356,63 +632,78 @@ export default function TeamDecisionPage() {
         </p>
       </div>
 
-      <Card className={hasDistanceReadyBase ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}>
+      <Card className="border-slate-200 bg-slate-50">
         <CardHeader>
-          <CardTitle className={hasDistanceReadyBase ? 'text-emerald-900' : 'text-amber-900'}>
-            Team Base Context
-          </CardTitle>
-          <CardDescription className={hasDistanceReadyBase ? 'text-emerald-800' : 'text-amber-800'}>
-            Distance is used as a soft tie-breaker when context is available.
+          <CardTitle className="text-slate-900">Team Overview</CardTitle>
+          <CardDescription className="text-slate-600">
+            Base context, participants, and privacy in one compact summary.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <BaseStatusBadge hasBase={hasTeamBase} />
-            {team.location && <span className="text-sm text-slate-700">{team.location}</span>}
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-lg border border-slate-200 bg-white p-3">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Team Base Context</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <BaseStatusBadge hasBase={hasTeamBase} />
+                {team.location && <span className="text-sm text-slate-700">{team.location}</span>}
+              </div>
+              {!hasDistanceReadyBase && (
+                <p className="mt-2 text-sm text-amber-800">
+                  Save a resolvable team base to unlock consistent distance context in ranking.
+                </p>
+              )}
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-white p-3">
+              <p className="text-xs uppercase tracking-wide text-slate-500">
+                Decision Participants ({team.members.length})
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {team.members.map((member) => (
+                  <span
+                    key={member.id}
+                    className="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-700"
+                  >
+                    {member.displayName || 'Anonymous'}
+                    {member.userId === user.id && ' (You)'}
+                  </span>
+                ))}
+              </div>
+            </div>
           </div>
-          {!hasDistanceReadyBase && (
-            <p className="text-sm text-amber-800">
-              Save a resolvable team base to unlock consistent distance context in ranking.
-            </p>
-          )}
+
+          <PrivacyCallout />
         </CardContent>
       </Card>
 
-      <PrivacyCallout />
-
-      {/* Team Members Summary */}
-      <Card className="border-blue-200 bg-blue-50">
-        <CardHeader>
-          <CardTitle className="text-blue-900">Decision Participants ({team.members.length} members)</CardTitle>
-          <CardDescription className="text-blue-800">Individual preferences stay private.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-2">
-            {team.members.map((member) => (
-              <span
-                key={member.id}
-                className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm"
-              >
-                {member.displayName || 'Anonymous'}
-                {member.userId === user.id && ' (You)'}
-              </span>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)] xl:items-start">
       {/* Restaurant Management & Available Data */}
       <Card className="border-green-200 bg-green-50">
         <CardHeader>
           <CardTitle className="text-green-900">Restaurant Data Setup</CardTitle>
           <CardDescription className="text-green-800">Refresh menu sources and keep recommendation context ready.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-6">
+        <CardContent className="flex flex-col gap-6">
           {/* Add New Restaurants Section */}
-          <div className="space-y-4">
-            <h3 className="text-lg font-medium text-green-900">Add or Refresh Restaurants</h3>
-            <p className="text-sm text-green-700">Enter restaurant URLs to fetch current menu context.</p>
-            
+          <div className="order-3 space-y-4 border-t border-green-300 pt-6">
+            <button
+              type="button"
+              onClick={() => setIsAddRefreshOpen((prev) => !prev)}
+              className="flex w-full items-start justify-between gap-3 rounded-lg border border-green-200 bg-white px-4 py-3 text-left"
+            >
+              <div>
+                <h3 className="text-lg font-medium text-green-900">Add or Refresh Restaurants</h3>
+                <p className="text-sm text-green-700">Enter restaurant URLs to fetch current menu context.</p>
+              </div>
+              {isAddRefreshOpen ? (
+                <ChevronUp className="mt-1 h-4 w-4 text-green-700" />
+              ) : (
+                <ChevronDown className="mt-1 h-4 w-4 text-green-700" />
+              )}
+            </button>
+
+            {isAddRefreshOpen && (
+              <>
             <div className="space-y-3">
               {restaurants.map((restaurant, index) => (
                 <div key={index} className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
@@ -535,15 +826,36 @@ export default function TeamDecisionPage() {
                 )}
               </div>
             )}
+              </>
+            )}
           </div>
 
-          <div className="space-y-4 pt-6 border-t border-green-300">
+          <div className="order-1 space-y-4">
             <div>
               <h3 className="text-lg font-medium text-green-900">Nearby Discovery</h3>
               <p className="text-sm text-green-700">
                 Find candidate restaurants near {team.location || 'the team location'} and rank them by compatibility.
               </p>
             </div>
+
+            <TeamRestaurantMap
+              teamBase={
+                typeof team.locationLat === 'number' && typeof team.locationLng === 'number'
+                  ? {
+                      id: team.id,
+                      name: team.location || team.name,
+                      lat: team.locationLat,
+                      lng: team.locationLng,
+                    }
+                  : null
+              }
+              restaurants={mapRestaurants}
+              selectedRestaurantId={selectedMapRestaurantId}
+              onSelectRestaurant={handleSelectMapRestaurant}
+              radiusMeters={discoveryResult ? DISCOVERY_RADIUS_METERS : undefined}
+              mapHeightClassName="h-[340px]"
+              emptyMessage="Run discovery or enrich restaurant data to populate this map."
+            />
 
             {team.locationLat == null || team.locationLng == null ? (
               <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 rounded">
@@ -563,7 +875,7 @@ export default function TeamDecisionPage() {
               className="rounded-2xl bg-emerald-600 hover:bg-emerald-700"
             >
               <Compass className="h-4 w-4 mr-2" />
-              {discoveryLoading ? 'Discovering Restaurants…' : 'Discover Restaurants'}
+              {discoveryLoading ? 'Discovering Restaurants...' : 'Discover Restaurants'}
             </Button>
 
             {discoveryLoading && (
@@ -577,10 +889,22 @@ export default function TeamDecisionPage() {
                 <div className="bg-emerald-100 border border-emerald-300 text-emerald-800 px-4 py-3 rounded">
                   Found {discoveryResult.results.length} ranked restaurants from {discoveryResult.candidateCount} nearby candidates.
                 </div>
+                <div className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded px-3 py-2">
+                  Shortlist {selectedDiscoveryUrls.size} restaurant(s). Agent session uses your shortlist for ingest.
+                </div>
 
                 <div className="space-y-3">
                   {discoveryResult.results.map((restaurant, index) => (
-                    <div key={`${restaurant.displayName}-${restaurant.formattedAddress}-${index}`} className="rounded-lg border border-green-200 bg-white p-4 space-y-3">
+                    <div
+                      key={`${restaurant.displayName}-${restaurant.formattedAddress}-${index}`}
+                      id={`restaurant-card-${getDiscoveredMapCardId(restaurant, index)}`}
+                      onMouseEnter={() => setSelectedMapRestaurantId(getDiscoveredMapCardId(restaurant, index))}
+                      className={`rounded-lg border bg-white p-4 space-y-3 transition-colors ${
+                        selectedMapRestaurantId === getDiscoveredMapCardId(restaurant, index)
+                          ? 'border-emerald-400'
+                          : 'border-green-200'
+                      }`}
+                    >
                       <div className="flex items-start justify-between gap-4">
                         <div>
                           <div className="font-medium text-green-900">
@@ -601,11 +925,23 @@ export default function TeamDecisionPage() {
                             {restaurant.formattedAddress}
                           </div>
                         </div>
-                        <div className="text-right">
+                        <div className="text-right space-y-1">
                           <div className="text-lg font-semibold text-emerald-700">
                             {restaurant.compatibilityScore.toFixed(1)}
                           </div>
                           <div className="text-xs text-slate-500">compatibility</div>
+                          {getDiscoveryRestaurantUrl(restaurant) ? (
+                            <label className="inline-flex items-center gap-1 text-xs text-slate-700">
+                              <input
+                                type="checkbox"
+                                checked={selectedDiscoveryUrls.has(getDiscoveryRestaurantUrl(restaurant) as string)}
+                                onChange={() => toggleDiscoverySelection(restaurant)}
+                              />
+                              shortlist
+                            </label>
+                          ) : (
+                            <div className="text-xs text-amber-700">No URL to ingest</div>
+                          )}
                         </div>
                       </div>
 
@@ -633,6 +969,21 @@ export default function TeamDecisionPage() {
                             {restaurant.researchResultType}
                           </span>
                         )}
+                      </div>
+
+                      <div className="space-y-1">
+                        {Object.entries(restaurant.scoreBreakdown || {}).map(([metric, value]) => (
+                          <div key={metric} className="grid grid-cols-[130px_1fr_auto] items-center gap-2 text-xs">
+                            <span className="text-slate-600">{prettifyPreferenceToken(metric)}</span>
+                            <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                              <div
+                                className="h-full bg-emerald-500"
+                                style={{ width: `${scoreWeight(value)}%` }}
+                              />
+                            </div>
+                            <span className="font-medium text-slate-700">{value.toFixed(1)}</span>
+                          </div>
+                        ))}
                       </div>
 
                       {restaurant.menuSummary && (
@@ -689,12 +1040,27 @@ export default function TeamDecisionPage() {
 
           {/* Existing Restaurants List */}
           {existingRestaurants && existingRestaurants.restaurants.length > 0 && (
-            <div className="space-y-4 pt-6 border-t border-green-300">
-              <div>
-                <h3 className="text-lg font-medium text-green-900">Available Restaurant Data ({existingRestaurants.totalCount})</h3>
-                <p className="text-sm text-green-700">Previously processed restaurants ready for decision making</p>
-              </div>
+            <div className="order-2 space-y-4 pt-6 border-t border-green-300">
+              <button
+                type="button"
+                onClick={() => setIsExistingDataOpen((prev) => !prev)}
+                className="flex w-full items-start justify-between gap-3 rounded-lg border border-green-200 bg-white px-4 py-3 text-left"
+              >
+                <div>
+                  <h3 className="text-lg font-medium text-green-900">
+                    Available Restaurant Data ({existingRestaurants.totalCount})
+                  </h3>
+                  <p className="text-sm text-green-700">Previously processed restaurants ready for decision making</p>
+                </div>
+                {isExistingDataOpen ? (
+                  <ChevronUp className="mt-1 h-4 w-4 text-green-700" />
+                ) : (
+                  <ChevronDown className="mt-1 h-4 w-4 text-green-700" />
+                )}
+              </button>
 
+              {isExistingDataOpen && (
+                <>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs uppercase tracking-wide text-slate-500">Sort</span>
                 {(['default', 'nearest', 'freshest'] as const).map((mode) => (
@@ -716,7 +1082,15 @@ export default function TeamDecisionPage() {
               <div className="space-y-2">
                 {sortedRestaurants.map((restaurant) => (
                   <div key={restaurant.id} className="space-y-2">
-                    <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-green-200">
+                    <div
+                      id={`restaurant-card-${getExistingMapCardId(restaurant.id)}`}
+                      onMouseEnter={() => setSelectedMapRestaurantId(getExistingMapCardId(restaurant.id))}
+                      className={`flex items-center justify-between p-3 bg-white rounded-lg border transition-colors ${
+                        selectedMapRestaurantId === getExistingMapCardId(restaurant.id)
+                          ? 'border-emerald-400'
+                          : 'border-green-200'
+                      }`}
+                    >
                       <div className="flex-1">
                         <div className="font-medium text-green-900">
                           {restaurant.displayName || (() => {
@@ -825,13 +1199,15 @@ export default function TeamDecisionPage() {
                   </p>
                 </div>
               )}
+                </>
+              )}
             </div>
           )}
         </CardContent>
       </Card>
 
       {/* AI Decision */}
-      <Card className="border-purple-200 bg-purple-50">
+      <Card className="border-purple-200 bg-purple-50 xl:sticky xl:top-6">
         <CardHeader>
           <CardTitle className="text-purple-900">Decision Recommendation</CardTitle>
           <CardDescription className="text-purple-800">Get a ranked recommendation based on masked team preferences and available restaurant data.</CardDescription>
@@ -840,6 +1216,9 @@ export default function TeamDecisionPage() {
           <p className="text-sm text-purple-700">
             Use the processed restaurant data to get an AI recommendation for today ({new Date().toLocaleDateString('en-US', { weekday: 'long' })})
           </p>
+          <div className="rounded-md border border-purple-200 bg-white px-3 py-2 text-sm text-purple-800">
+            Agent status: <span className="font-semibold">{agentStageLabel}</span>
+          </div>
           <div className="bg-blue-50 border border-blue-200 text-blue-700 px-3 py-2 rounded text-xs">
             The AI considers current day context when selecting from weekly menus.
           </div>
@@ -848,6 +1227,42 @@ export default function TeamDecisionPage() {
               ? 'Distance is used as a soft tie-breaker, not a hard filter.'
               : 'Set a resolvable team base for stronger distance-aware tie-breaks.'}
           </div>
+
+          <div className="space-y-2">
+            <p className="text-xs uppercase tracking-wide text-purple-700">Agent Prompt Style</p>
+            <div className="flex flex-wrap gap-2">
+              {PROMPT_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => setSelectedPresetId(preset.id)}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium ${
+                    selectedPresetId === preset.id
+                      ? 'border-purple-700 bg-purple-700 text-white'
+                      : 'border-purple-300 bg-white text-purple-700 hover:bg-purple-50'
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-purple-200 bg-white p-3">
+            <p className="text-xs uppercase tracking-wide text-purple-700 mb-2">Agent Activity</p>
+            {agentActivities.length === 0 ? (
+              <p className="text-sm text-slate-600">No run yet. Start a session to see the reasoning timeline.</p>
+            ) : (
+              <ul className="space-y-2 text-sm text-slate-700">
+                {agentActivities.slice(-8).map((activity) => (
+                  <li key={activity.id} className="rounded border border-slate-200 bg-slate-50 px-2 py-1">
+                    <span className="font-medium">{activity.title}</span>
+                    {activity.detail ? <span className="text-slate-600"> - {activity.detail}</span> : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           
           {agentError && (
             <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
@@ -855,20 +1270,29 @@ export default function TeamDecisionPage() {
             </div>
           )}
 
-          <Button 
-            onClick={handleMakeAgentDecision} 
-            disabled={agentDeciding || (
-              (!processResult || processResult.restaurantIds.length === 0) && 
-              (!existingRestaurants || existingRestaurants.restaurants.filter(r => r.hasContent).length === 0)
-            )} 
-            className="rounded-2xl bg-purple-600 hover:bg-purple-700"
-          >
-            {agentDeciding ? 'Making Decision...' : 'Make AI Decision'}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              onClick={handleRunAgentSession}
+              disabled={isAgentBusy}
+              className="rounded-2xl bg-purple-700 hover:bg-purple-800"
+            >
+              {agentAutoRunning ? 'Running Agent Session...' : 'Run Agent Session'}
+            </Button>
+            <Button
+              onClick={handleMakeAgentDecision}
+              disabled={isAgentBusy || (
+                (!processResult || processResult.restaurantIds.length === 0) &&
+                (!existingRestaurants || existingRestaurants.restaurants.filter(r => r.hasContent).length === 0)
+              )}
+              className="rounded-2xl bg-purple-600 hover:bg-purple-700"
+            >
+              {agentDeciding ? 'Making Decision...' : 'Decision Only (Use Existing Data)'}
+            </Button>
+          </div>
 
-          {agentDeciding && (
+          {isAgentBusy && (
             <div className="bg-white border border-purple-200 rounded-lg p-6">
-              <LoadingSpinner message="AI is analyzing team preferences and menus..." size="md" />
+              <LoadingSpinner message="Agent session is running across discovery, menu ingest, and reasoning..." size="md" />
             </div>
           )}
 
@@ -936,6 +1360,7 @@ export default function TeamDecisionPage() {
           </div>
         </CardContent>
       </Card>
+      </div>
 
     </div>
   )

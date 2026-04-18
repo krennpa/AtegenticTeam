@@ -188,6 +188,8 @@ export interface ExistingRestaurant {
   url: string
   displayName?: string
   formattedAddress?: string
+  locationLat?: number
+  locationLng?: number
   straightLineDistanceKm?: number
   lastScrapedAt?: string
   menuType?: string
@@ -210,6 +212,8 @@ export interface DiscoverRestaurantsRequest {
 export interface DiscoveredRestaurant {
   displayName: string
   formattedAddress?: string
+  locationLat?: number
+  locationLng?: number
   websiteUri?: string | null
   mapsUri?: string | null
   primaryType?: string | null
