@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = Field(default="openai", description="LLM provider: openai | vertexai")
     OPENAI_MODEL: str = Field(default="gpt-4o-mini", description="Default OpenAI chat model")
     OPENAI_MENU_MODEL: str = Field(default="gpt-4o-mini", description="OpenAI model for menu extraction")
+    OPENAI_DECISION_MODEL: str | None = Field(
+        default=None,
+        description="OpenAI model for team decision judging",
+    )
+    OPENAI_DECISION_TEMPERATURE: float = Field(
+        default=0.1,
+        description="Sampling temperature for team decision judging",
+    )
     VERTEX_MODEL: str = Field(default="gemini-2.5-pro", description="Default Vertex chat model")
     OPENAI_API_KEY: str | None = Field(default=None, description="OpenAI API key")
     MENU_SCRAPER: str = Field(default="openai", description="Menu extraction mode: openai | legacy")

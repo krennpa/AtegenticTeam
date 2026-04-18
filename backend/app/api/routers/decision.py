@@ -676,7 +676,7 @@ async def agent_decide(
     session: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Runs the LangGraph agent to make a decision."""
+    """Runs the backend decision engine to make a team recommendation."""
     # 1. Validate team membership
     team = session.exec(select(Team).where(Team.id == payload.team_id)).first()
     if not team:
@@ -710,25 +710,33 @@ async def agent_decide(
     try:
         payload_dict = payload.model_dump()
         result = await run_decision_agent(request=payload_dict, db_session=session)
+        public_result = {
+            "recommendation_restaurant_name": result.get("recommendation_restaurant_name", ""),
+            "recommendation_restaurant_url": result.get("recommendation_restaurant_url"),
+            "recommended_dish": result.get("recommended_dish", ""),
+            "explanation_md": result.get("explanation_md", ""),
+            "raw_text": result.get("raw_text", ""),
+        }
+        internal_diagnostics = result.get("internal_diagnostics") or {}
         logger.info("Agent decision completed for team_id=%s.", payload.team_id)
         
         # 4. Enhance result with restaurant name if missing
-        if not result.get("recommendation_restaurant_name") or result.get("recommendation_restaurant_name") == "":
+        if not public_result.get("recommendation_restaurant_name") or public_result.get("recommendation_restaurant_name") == "":
             # Try to extract from URL if present
-            if result.get("recommendation_restaurant_url"):
+            if public_result.get("recommendation_restaurant_url"):
                 from urllib.parse import urlparse
                 try:
-                    parsed = urlparse(result["recommendation_restaurant_url"])
+                    parsed = urlparse(public_result["recommendation_restaurant_url"])
                     domain = parsed.netloc or parsed.path
                     if domain.startswith("www."):
                         domain = domain[4:]
                     domain = domain.split(":")[0]
-                    result["recommendation_restaurant_name"] = domain
+                    public_result["recommendation_restaurant_name"] = domain
                 except Exception:
                     pass
             
             # If still empty, try to match against restaurant URLs
-            if not result.get("recommendation_restaurant_name") or result.get("recommendation_restaurant_name") == "":
+            if not public_result.get("recommendation_restaurant_name") or public_result.get("recommendation_restaurant_name") == "":
                 restaurants = session.exec(
                     select(Restaurant).where(Restaurant.id.in_(restaurant_ids))
                 ).all()
@@ -741,17 +749,21 @@ async def agent_decide(
                         if domain.startswith("www."):
                             domain = domain[4:]
                         domain = domain.split(":")[0]
-                        result["recommendation_restaurant_name"] = domain
+                        public_result["recommendation_restaurant_name"] = domain
                     except Exception:
-                        result["recommendation_restaurant_name"] = restaurants[0].url
+                        public_result["recommendation_restaurant_name"] = restaurants[0].url
         
         # 5. Save the decision to history
+        persisted_result = {
+            **public_result,
+            "internal_diagnostics": internal_diagnostics,
+        }
         decision_run = DecisionRun(
             organizer_user_id=current_user.id,
             team_id=payload.team_id,
             participant_profile_ids=[],  # Could be populated with team member profile IDs if needed
             restaurant_ids=restaurant_ids,
-            result=result,
+            result=persisted_result,
         )
         session.add(decision_run)
         session.commit()
@@ -766,7 +778,7 @@ async def agent_decide(
             )
         ).all()
         
-        restaurant_name = result.get("recommendation_restaurant_name", "a restaurant")
+        restaurant_name = public_result.get("recommendation_restaurant_name", "a restaurant")
         for member in team_members:
             notification = Notification(
                 user_id=member.user_id,
@@ -780,7 +792,7 @@ async def agent_decide(
         
         session.commit()
         
-        return result
+        return public_result
     except Exception as e:
         logger.error("Agent decision failed for team_id=%s: %s", payload.team_id, e, exc_info=True)
         raise HTTPException(
@@ -850,8 +862,13 @@ def get_decision_history(
                 if restaurants:
                     result["recommendation_restaurant_name"] = _extract_restaurant_name_from_url(restaurants[0].url)
         
-        # Convert result keys to camelCase for frontend
-        camel_result = {_snake_to_camel(k): v for k, v in result.items()}
+        # Convert result keys to camelCase for frontend and keep internal diagnostics backend-only
+        public_result = {
+            key: value
+            for key, value in result.items()
+            if key != "internal_diagnostics"
+        }
+        camel_result = {_snake_to_camel(k): v for k, v in public_result.items()}
         
         result_list.append(DecisionRunRead(
             id=d.id,

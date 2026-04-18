@@ -19,6 +19,7 @@ from ...preferences.service import (
     rebuild_user_team_preferences,
     record_profile_preference_event,
 )
+from ...decision.context_service import rebuild_user_team_decision_contexts
 
 router = APIRouter()
 
@@ -64,6 +65,7 @@ def update_my_profile(
     session.commit()
     session.refresh(profile)
     rebuild_user_team_preferences(session, current_user.id)
+    rebuild_user_team_decision_contexts(session, current_user.id)
     return profile
 
 
@@ -100,6 +102,7 @@ def submit_profile_preference_event(
         team_id=payload.team_id,
     )
     rebuild_user_team_preferences(session, current_user.id)
+    rebuild_user_team_decision_contexts(session, current_user.id)
 
     return ProfilePreferenceEventRead(
         id=event.id,

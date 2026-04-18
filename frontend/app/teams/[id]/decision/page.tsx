@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { useAuth } from '../../../../lib/auth-context'
 import { TeamWithMembers, AgentDecisionResponse, IngestRestaurantInput, IngestRestaurantsResponse, ExistingRestaurantsResponse, RestaurantDocument } from '../../../../lib/types'
 import { useParams } from 'next/navigation'
@@ -12,6 +12,12 @@ import { RefreshCw, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { LoadingSpinner } from '../../../../components/ui/loading-spinner'
+import { BaseStatusBadge } from '../../../../components/ui/base-status-badge'
+import { DistanceBadge } from '../../../../components/ui/distance-badge'
+import { FreshnessBadge } from '../../../../components/ui/freshness-badge'
+import { PrivacyCallout } from '../../../../components/ui/privacy-callout'
+
+type RestaurantSort = 'default' | 'nearest' | 'freshest'
 
 export default function TeamDecisionPage() {
   const { api, user } = useAuth()
@@ -41,6 +47,7 @@ export default function TeamDecisionPage() {
   // Restaurant action states
   const [rescrapingIds, setRescrapingIds] = useState<Set<string>>(new Set())
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set())
+  const [restaurantSort, setRestaurantSort] = useState<RestaurantSort>('default')
 
   useEffect(() => {
     if (api && teamId) {
@@ -89,38 +96,42 @@ export default function TeamDecisionPage() {
     }
   }
 
-  const handleRescrapeRestaurant = async (restaurantId: string) => {
+  const handleRescrapeRestaurant = async (restaurant: { id: string; url: string; displayName?: string }) => {
     try {
-      setRescrapingIds(prev => new Set(prev).add(restaurantId))
-      await api.post(`/restaurants/${restaurantId}/rescrape?force=true`)
+      setRescrapingIds(prev => new Set(prev).add(restaurant.id))
+      await api.post<IngestRestaurantsResponse>('/decision/ingest-restaurants', {
+        teamId,
+        restaurants: [{ url: restaurant.url, name: restaurant.displayName }],
+        forceRescrape: true,
+      })
       // Reload content and restaurant list
-      await loadRawContent(restaurantId)
+      await loadRawContent(restaurant.id)
       await loadExistingRestaurants()
     } catch (err) {
-      console.error('Failed to rescrape restaurant:', err)
-      alert('Failed to rescrape restaurant. Please try again.')
+      console.error('Failed to refresh restaurant data:', err)
+      alert('Failed to refresh restaurant data. Please try again.')
     } finally {
       setRescrapingIds(prev => {
         const newSet = new Set(prev)
-        newSet.delete(restaurantId)
+        newSet.delete(restaurant.id)
         return newSet
       })
     }
   }
 
   const handleDeleteRestaurant = async (restaurantId: string) => {
-    if (!confirm('Are you sure you want to delete this restaurant? This will remove all its data.')) {
+    if (!confirm('Remove this restaurant from the team? The global restaurant record remains unchanged.')) {
       return
     }
     
     try {
       setDeletingIds(prev => new Set(prev).add(restaurantId))
-      await api.delete(`/restaurants/${restaurantId}`)
+      await api.delete(`/api/teams/${teamId}/restaurants/${restaurantId}`)
       // Reload restaurant list
       await loadExistingRestaurants()
     } catch (err) {
       console.error('Failed to delete restaurant:', err)
-      alert('Failed to delete restaurant. Please try again.')
+      alert('Failed to remove restaurant from this team. Please try again.')
     } finally {
       setDeletingIds(prev => {
         const newSet = new Set(prev)
@@ -236,6 +247,35 @@ export default function TeamDecisionPage() {
     }
   }
 
+  const hasTeamBase = Boolean(team?.location && team.location.trim())
+  const hasDistanceReadyBase =
+    typeof team?.locationLat === 'number' && typeof team?.locationLng === 'number'
+
+  const sortedRestaurants = useMemo(() => {
+    const source = existingRestaurants?.restaurants ?? []
+    const sorted = [...source]
+
+    if (restaurantSort === 'nearest') {
+      sorted.sort((a, b) => {
+        const aDistance = typeof a.straightLineDistanceKm === 'number' ? a.straightLineDistanceKm : Number.POSITIVE_INFINITY
+        const bDistance = typeof b.straightLineDistanceKm === 'number' ? b.straightLineDistanceKm : Number.POSITIVE_INFINITY
+        return aDistance - bDistance
+      })
+      return sorted
+    }
+
+    if (restaurantSort === 'freshest') {
+      sorted.sort((a, b) => {
+        const aFreshness = typeof a.contentAgeDays === 'number' ? a.contentAgeDays : Number.POSITIVE_INFINITY
+        const bFreshness = typeof b.contentAgeDays === 'number' ? b.contentAgeDays : Number.POSITIVE_INFINITY
+        return aFreshness - bFreshness
+      })
+      return sorted
+    }
+
+    return source
+  }, [existingRestaurants, restaurantSort])
+
   if (!user) {
     return (
       <div className="text-center py-8">
@@ -287,11 +327,35 @@ export default function TeamDecisionPage() {
         </p>
       </div>
 
+      <Card className={hasDistanceReadyBase ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}>
+        <CardHeader>
+          <CardTitle className={hasDistanceReadyBase ? 'text-emerald-900' : 'text-amber-900'}>
+            Team Base Context
+          </CardTitle>
+          <CardDescription className={hasDistanceReadyBase ? 'text-emerald-800' : 'text-amber-800'}>
+            Distance is used as a soft tie-breaker when context is available.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <BaseStatusBadge hasBase={hasTeamBase} />
+            {team.location && <span className="text-sm text-slate-700">{team.location}</span>}
+          </div>
+          {!hasDistanceReadyBase && (
+            <p className="text-sm text-amber-800">
+              Save a resolvable team base to unlock consistent distance context in ranking.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      <PrivacyCallout />
+
       {/* Team Members Summary */}
       <Card className="border-blue-200 bg-blue-50">
         <CardHeader>
           <CardTitle className="text-blue-900">Decision Participants ({team.members.length} members)</CardTitle>
-          <CardDescription className="text-blue-800">✓ Individual preferences are kept private</CardDescription>
+          <CardDescription className="text-blue-800">Individual preferences stay private.</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap gap-2">
@@ -311,14 +375,14 @@ export default function TeamDecisionPage() {
       {/* Restaurant Management & Available Data */}
       <Card className="border-green-200 bg-green-50">
         <CardHeader>
-          <CardTitle className="text-green-900">Restaurant Management</CardTitle>
-          <CardDescription className="text-green-800">Add new restaurants or manage existing ones</CardDescription>
+          <CardTitle className="text-green-900">Restaurant Data Setup</CardTitle>
+          <CardDescription className="text-green-800">Refresh menu sources and keep recommendation context ready.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
           {/* Add New Restaurants Section */}
           <div className="space-y-4">
-            <h3 className="text-lg font-medium text-green-900">Add New Restaurants</h3>
-            <p className="text-sm text-green-700">Enter restaurant URLs to fetch and scrape menu data</p>
+            <h3 className="text-lg font-medium text-green-900">Add or Refresh Restaurants</h3>
+            <p className="text-sm text-green-700">Enter restaurant URLs to fetch current menu context.</p>
             
             <div className="space-y-3">
               {restaurants.map((restaurant, index) => (
@@ -380,7 +444,7 @@ export default function TeamDecisionPage() {
               disabled={processing || restaurants.filter((restaurant) => restaurant.url.trim()).length === 0} 
               className="rounded-2xl bg-green-600 hover:bg-green-700"
             >
-              {processing ? 'Processing Information…' : 'Process Restaurant Information'}
+              {processing ? 'Refreshing data...' : 'Refresh Menu Data'}
             </Button>
 
             {processing && (
@@ -392,10 +456,10 @@ export default function TeamDecisionPage() {
             {processResult && !processing && (
               <div className="space-y-3">
                 <div className="bg-green-100 border border-green-300 text-green-800 px-4 py-3 rounded">
-                  ✅ Successfully processed {processResult.processedCount} restaurant(s). 
+                  Successfully processed {processResult.processedCount} restaurant(s). 
                   {processResult.createdCount > 0 && ` Created ${processResult.createdCount} new restaurant(s).`}
                   <br />
-                  📊 {processResult.scrapedCount || 0} scraped, {processResult.cachedCount || 0} cached
+                  {processResult.scrapedCount || 0} scraped, {processResult.cachedCount || 0} cached
                 </div>
                 
                 {processResult.processingDetails && processResult.processingDetails.length > 0 && (
@@ -437,7 +501,7 @@ export default function TeamDecisionPage() {
                 
                 {processResult.processingDetails && processResult.processingDetails.some(d => d.action === 'cached' && d.reason.includes('days old')) && (
                   <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 rounded">
-                    ⚠️ Some restaurants are using cached data. Consider re-processing if you need the latest menus.
+                    Some restaurants are using cached data. Consider re-processing if you need the latest menus.
                   </div>
                 )}
               </div>
@@ -451,9 +515,27 @@ export default function TeamDecisionPage() {
                 <h3 className="text-lg font-medium text-green-900">Available Restaurant Data ({existingRestaurants.totalCount})</h3>
                 <p className="text-sm text-green-700">Previously processed restaurants ready for decision making</p>
               </div>
-              
+
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs uppercase tracking-wide text-slate-500">Sort</span>
+                {(['default', 'nearest', 'freshest'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setRestaurantSort(mode)}
+                    className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                      restaurantSort === mode
+                        ? 'border-slate-900 bg-slate-900 text-white'
+                        : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    {mode === 'default' ? 'Most relevant' : mode === 'nearest' ? 'Nearest' : 'Freshest'}
+                  </button>
+                ))}
+              </div>
+               
               <div className="space-y-2">
-                {existingRestaurants.restaurants.map((restaurant) => (
+                {sortedRestaurants.map((restaurant) => (
                   <div key={restaurant.id} className="space-y-2">
                     <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-green-200">
                       <div className="flex-1">
@@ -475,30 +557,13 @@ export default function TeamDecisionPage() {
                             </span>
                           )}
                         </div>
-                        <div className="text-sm text-green-700">
-                          {restaurant.contentAgeDays !== undefined && (
-                            <span>
-                              {restaurant.contentAgeDays === 0 ? 'Updated today' : 
-                               restaurant.contentAgeDays === 1 ? 'Updated 1 day ago' :
-                               `Updated ${restaurant.contentAgeDays} days ago`}
-                            </span>
-                          )}
-                          {restaurant.hasContent ? (
-                            <span className="ml-2 text-green-600">✓ Ready</span>
-                          ) : (
-                            <span className="ml-2 text-red-600">⚠ No content</span>
-                          )}
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <FreshnessBadge contentAgeDays={restaurant.contentAgeDays} hasContent={restaurant.hasContent} />
+                          <DistanceBadge distanceKm={restaurant.straightLineDistanceKm} />
                         </div>
-                        {(restaurant.formattedAddress || restaurant.straightLineDistanceKm !== undefined) && (
+                        {restaurant.formattedAddress && (
                           <div className="text-sm text-slate-600 mt-1">
-                            {restaurant.formattedAddress && (
-                              <span>{restaurant.formattedAddress}</span>
-                            )}
-                            {restaurant.straightLineDistanceKm !== undefined && (
-                              <span className={restaurant.formattedAddress ? 'ml-2' : ''}>
-                                {restaurant.straightLineDistanceKm.toFixed(2)} km from team
-                              </span>
-                            )}
+                            {restaurant.formattedAddress}
                           </div>
                         )}
                       </div>
@@ -506,12 +571,16 @@ export default function TeamDecisionPage() {
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => handleRescrapeRestaurant(restaurant.id)}
+                          onClick={() => handleRescrapeRestaurant({
+                            id: restaurant.id,
+                            url: restaurant.url,
+                            displayName: restaurant.displayName,
+                          })}
                           disabled={rescrapingIds.has(restaurant.id)}
                           className="flex items-center gap-1"
                         >
                           <RefreshCw className={`h-3 w-3 ${rescrapingIds.has(restaurant.id) ? 'animate-spin' : ''}`} />
-                          {rescrapingIds.has(restaurant.id) ? 'Rescaping...' : 'Reload'}
+                          {rescrapingIds.has(restaurant.id) ? 'Refreshing...' : 'Refresh'}
                         </Button>
                         <Button
                           size="sm"
@@ -573,7 +642,7 @@ export default function TeamDecisionPage() {
               {existingRestaurants.restaurants.filter(r => r.hasContent).length > 0 && (
                 <div className="p-3 bg-green-100 rounded-lg">
                   <p className="text-sm text-green-800">
-                    ✅ You can make AI decisions using these {existingRestaurants.restaurants.filter(r => r.hasContent).length} restaurant(s) without re-processing.
+                    You can make AI decisions using these {existingRestaurants.restaurants.filter(r => r.hasContent).length} restaurant(s) without re-processing.
                   </p>
                 </div>
               )}
@@ -585,15 +654,20 @@ export default function TeamDecisionPage() {
       {/* AI Decision */}
       <Card className="border-purple-200 bg-purple-50">
         <CardHeader>
-          <CardTitle className="text-purple-900">AI Decision</CardTitle>
-          <CardDescription className="text-purple-800">Get an AI recommendation based on team preferences and available restaurants</CardDescription>
+          <CardTitle className="text-purple-900">Decision Recommendation</CardTitle>
+          <CardDescription className="text-purple-800">Get a ranked recommendation based on masked team preferences and available restaurant data.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-sm text-purple-700">
             Use the processed restaurant data to get an AI recommendation for today ({new Date().toLocaleDateString('en-US', { weekday: 'long' })})
           </p>
           <div className="bg-blue-50 border border-blue-200 text-blue-700 px-3 py-2 rounded text-xs">
-            🗓️ The AI will consider today's day when selecting from weekly menus
+            The AI considers current day context when selecting from weekly menus.
+          </div>
+          <div className="bg-slate-50 border border-slate-200 text-slate-700 px-3 py-2 rounded text-xs">
+            {hasDistanceReadyBase
+              ? 'Distance is used as a soft tie-breaker, not a hard filter.'
+              : 'Set a resolvable team base for stronger distance-aware tie-breaks.'}
           </div>
           
           {agentError && (
@@ -610,7 +684,7 @@ export default function TeamDecisionPage() {
             )} 
             className="rounded-2xl bg-purple-600 hover:bg-purple-700"
           >
-            {agentDeciding ? 'Making Decision…' : 'Make AI Decision'}
+            {agentDeciding ? 'Making Decision...' : 'Make AI Decision'}
           </Button>
 
           {agentDeciding && (

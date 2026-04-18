@@ -58,6 +58,26 @@ def _apply_sqlite_schema_updates(database_url: str) -> None:
             cursor.execute("ALTER TABLE teams ADD COLUMN location_lat REAL")
         if "location_lng" not in columns:
             cursor.execute("ALTER TABLE teams ADD COLUMN location_lng REAL")
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS team_decision_contexts (
+                id TEXT PRIMARY KEY,
+                team_id TEXT NOT NULL UNIQUE,
+                schema_version TEXT NOT NULL DEFAULT 'v1',
+                context_json TEXT NOT NULL DEFAULT '{}',
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                FOREIGN KEY (team_id) REFERENCES teams(id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS ix_team_decision_contexts_team_id
+            ON team_decision_contexts(team_id)
+            """
+        )
         conn.commit()
 
 

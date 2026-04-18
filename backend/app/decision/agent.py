@@ -1,184 +1,124 @@
 from datetime import datetime
+from typing import Any
 
-from langchain.tools import Tool
-from langgraph.prebuilt import create_react_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from sqlmodel import Session
 
-from .tools import RetrieveMenuMarkdownsTool, RetrieveNeedsTool
-from ..core.config import settings
-from .prompts import REASONING_PROMPT
-from .llm_factory import get_chat_model
+from .context_service import get_or_rebuild_team_decision_context
+from .tools import RetrieveMenuMarkdownsTool
+from ..integrations.openai_decision_judge import (
+    OpenAIDecisionJudgeConfigError,
+    OpenAIDecisionJudgeError,
+    run_openai_decision_judge,
+)
 
 
-# 1. Initialize LLM lazily to avoid startup failures without credentials
-_llm = None
-
-def get_llm():
-    """Get or initialize the LLM instance."""
-    global _llm
-    if _llm is None:
-        _llm = get_chat_model()
-    return _llm
-
-
-def _parse_agent_response(text: str) -> dict:
-    """Parse the agent's final markdown text into structured fields.
-    Expects lines with bold headings:
-      **Recommendation**: <value>
-      **Dish**: <value>
-      **Reasoning**: <value>
-    Returns a dict with recommendation_restaurant_name, recommendation_restaurant_url,
-    recommended_dish, explanation_md, raw_text.
-    """
-    from urllib.parse import urlparse
-    
-    recommendation = ""
-    dish = ""
-    reasoning = ""
-
-    for line in (text or "").splitlines():
-        s = line.strip()
-        lower = s.lower()
-        if lower.startswith("**recommendation**"):
-            try:
-                value = s.split(":", 1)[1].strip()
-            except Exception:
-                value = s
-            recommendation = value
-        elif lower.startswith("**dish**"):
-            try:
-                value = s.split(":", 1)[1].strip()
-            except Exception:
-                value = s
-            dish = value
-        elif lower.startswith("**reasoning**"):
-            try:
-                value = s.split(":", 1)[1].strip()
-            except Exception:
-                value = s
-            reasoning = value
-
-    rec_name = recommendation
-    rec_url = None
-    if recommendation.startswith("http://") or recommendation.startswith("https://"):
-        rec_url = recommendation
-        # Extract clean domain name from URL (without www.)
-        try:
-            parsed = urlparse(recommendation)
-            domain = parsed.netloc or parsed.path
-            # Remove www. prefix if present
-            if domain.startswith("www."):
-                domain = domain[4:]
-            # Remove port if present
-            domain = domain.split(":")[0]
-            rec_name = domain
-        except Exception:
-            rec_name = recommendation
-
-    return {
-        "recommendation_restaurant_name": rec_name or "",
-        "recommendation_restaurant_url": rec_url,
-        "recommended_dish": dish or "",
-        "explanation_md": reasoning or (text or ""),
-        "raw_text": text or "",
-    }
+def _extract_first_dish(menu_markdown: str) -> str:
+    for raw_line in (menu_markdown or "").splitlines():
+        line = raw_line.replace("\u2022", " ").strip().lstrip("-* ").strip()
+        if not line:
+            continue
+        if line.endswith(":"):
+            continue
+        if len(line) < 4:
+            continue
+        return line
+    return "Chef's recommendation"
 
 
-def create_decision_agent_executor(db_session: Session, team_id: str):
-    """Creates and returns the LangGraph agent executor."""
-
-    # 3. Initialize Tools with the database session
-    needs_tool = RetrieveNeedsTool(db_session=db_session)
-    menu_tool = RetrieveMenuMarkdownsTool(db_session=db_session, team_id=team_id)
-
-    # Wrap them in LangChain's Tool class
-    tools = [
-        Tool(
-            name=needs_tool.name,
-            func=needs_tool._run,
-            description=needs_tool.description,
-            args_schema=needs_tool.args_schema,
-        ),
-        Tool(
-            name=menu_tool.name,
-            func=menu_tool._run,
-            description=menu_tool.description,
-            args_schema=menu_tool.args_schema,
-        ),
-    ]
-
-    # 4. Create the prompt for the ReAct Agent using only the 'messages' state
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", REASONING_PROMPT),
-            MessagesPlaceholder(variable_name="messages"),
-        ]
+def _build_raw_text(result: dict[str, Any]) -> str:
+    return (
+        f"**Recommendation**: {result.get('recommendation_restaurant_name', '')}\n"
+        f"**Dish**: {result.get('recommended_dish', '')}\n"
+        f"**Reasoning**: {result.get('explanation_md', '')}"
     )
 
-    # 5. Create the ReAct Agent
-    agent_executor = create_react_agent(model=get_llm(), tools=tools, prompt=prompt)
 
-    return agent_executor
+def _build_fallback_result(menus: list[dict[str, Any]], reason: str) -> dict[str, Any]:
+    candidate = next((menu for menu in menus if menu.get("menu_markdown")), None)
+    if not candidate and menus:
+        candidate = menus[0]
+
+    restaurant_name = ""
+    restaurant_url = None
+    dish = "Chef's recommendation"
+    explanation = (
+        "Selected using available team and menu context while keeping preference constraints balanced."
+    )
+    if candidate:
+        restaurant_name = str(
+            candidate.get("restaurant_name") or candidate.get("restaurant_url") or ""
+        ).strip()
+        candidate_url = candidate.get("restaurant_url")
+        restaurant_url = (
+            str(candidate_url).strip() if isinstance(candidate_url, str) else None
+        )
+        dish = _extract_first_dish(str(candidate.get("menu_markdown") or ""))
+
+    result: dict[str, Any] = {
+        "recommendation_restaurant_name": restaurant_name,
+        "recommendation_restaurant_url": restaurant_url,
+        "recommended_dish": dish,
+        "explanation_md": explanation,
+    }
+    result["raw_text"] = _build_raw_text(result)
+    result["internal_diagnostics"] = {
+        "fallback_used": True,
+        "fallback_reason": reason,
+    }
+    return result
 
 
-async def run_decision_agent(request: dict, db_session: Session):
-    """Runs the decision agent and returns the final result based on the latest documentation."""
-    agent = create_decision_agent_executor(db_session=db_session, team_id=request["team_id"])
+async def run_decision_agent(request: dict[str, Any], db_session: Session) -> dict[str, Any]:
+    """
+    Runs the OpenAI-backed team decision judge.
 
-    # Get current day information with full context
+    Returns the frontend response shape plus internal diagnostics for persistence.
+    """
+    team_id = str(request.get("team_id") or "")
+    restaurant_ids = request.get("restaurant_ids") or []
+    user_question = str(
+        request.get("user_question")
+        or "Based on the team's needs and the restaurant menus, what is the best lunch option? Please provide one restaurant and one specific dish recommendation, along with a brief explanation."
+    )
+
+    snapshot = get_or_rebuild_team_decision_context(
+        db_session,
+        team_id,
+        stale_after_seconds=300,
+    )
+    team_decision_context = snapshot.context_json or {}
+
+    menu_tool = RetrieveMenuMarkdownsTool(db_session=db_session, team_id=team_id)
+    menu_result = menu_tool._run(restaurant_ids=restaurant_ids)
+    menus = [
+        menu
+        for menu in (menu_result.get("menus") or [])
+        if isinstance(menu, dict) and not menu.get("error")
+    ]
+    if not menus:
+        return _build_fallback_result(
+            [],
+            "No menu data available for requested restaurants",
+        )
+
     now = datetime.now()
-    current_day = now.strftime("%A")  # Full day name (e.g., "Monday")
-    current_date = now.strftime("%Y-%m-%d")  # ISO date format
-    current_time = now.strftime("%H:%M")  # Time in HH:MM format
+    current_day = now.strftime("%A")
+    current_date = now.strftime("%Y-%m-%d")
+    current_time = now.strftime("%H:%M")
 
-    # Prepare the input for the agent using the 'messages' state key expected by create_react_agent
-    input_message = f"""Current Date & Time: {current_day}, {current_date} at {current_time}
-Team ID: {request['team_id']}
-Restaurant IDs: {request['restaurant_ids']}
-
-CONTEXT:
-- Today is {current_day}. This is CRITICAL for menu selection.
-- Some restaurants have daily menus (only today's items available)
-- Some restaurants have weekly menus (different items each day)
-- Some restaurants have static menus (same items always available)
-- You MUST use the tools to retrieve team needs and restaurant menus with their metadata
-- Restaurant menu tool results may include team location and straight-line distance context
-- Pay attention to menu_type, detected_days, and freshness in the menu data
-- Select dishes that are available TODAY ({current_day})
-
-User Question: {request['user_question']}
-
-Remember: Use retrieve_team_needs and retrieve_restaurant_menus tools to gather all necessary information before making your recommendation."""
-    inputs = {"messages": [("human", input_message)]}
-
-    # Invoke the agent and get the final state
-    result_state = await agent.ainvoke(inputs)
-
-    # Prefer the last AI message content if present
-    final_response = ""
-    messages = result_state.get("messages", [])
-    if messages:
-        try:
-            final_response = messages[-1].content or ""
-        except Exception:
-            pass
-
-    # Fallback: some executors return 'output'
-    if not final_response and isinstance(result_state, dict) and "output" in result_state:
-        final_response = result_state.get("output") or ""
-
-    # Final fallback: directly ping the LLM to verify connectivity (only if explicitly enabled via settings)
-    if not final_response and bool(getattr(settings, "agent_test_fallback", False)):
-        try:
-            ping = get_llm().invoke([("human", "Reply exactly: model connectivity is healthy")])
-            final_response = getattr(ping, "content", "") or ""
-        except Exception:
-            pass
-
-    # Build structured response
-    structured = _parse_agent_response(final_response)
-    if not structured["raw_text"]:
-        structured = _parse_agent_response("Agent finished without a final response.")
-
-    return structured
+    try:
+        result = await run_openai_decision_judge(
+            team_decision_context=team_decision_context,
+            menus=menus,
+            user_question=user_question,
+            current_day=current_day,
+            current_date=current_date,
+            current_time=current_time,
+        )
+        return result
+    except OpenAIDecisionJudgeConfigError as exc:
+        return _build_fallback_result(menus, f"Decision judge misconfigured: {exc}")
+    except OpenAIDecisionJudgeError as exc:
+        return _build_fallback_result(menus, f"Decision judge failed: {exc}")
+    except Exception as exc:
+        return _build_fallback_result(menus, f"Unexpected decision judge failure: {exc}")
