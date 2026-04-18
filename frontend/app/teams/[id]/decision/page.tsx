@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react'
 import { useAuth } from '../../../../lib/auth-context'
-import { TeamWithMembers, AgentDecisionResponse, IngestRestaurantsResponse, ExistingRestaurantsResponse, RestaurantDocument } from '../../../../lib/types'
+import { TeamWithMembers, AgentDecisionResponse, IngestRestaurantInput, IngestRestaurantsResponse, ExistingRestaurantsResponse, RestaurantDocument } from '../../../../lib/types'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../../../components/ui/card'
@@ -19,7 +19,7 @@ export default function TeamDecisionPage() {
   const teamId = params.id as string
   
   const [team, setTeam] = useState<TeamWithMembers | null>(null)
-  const [restaurants, setRestaurants] = useState<string[]>([''])
+  const [restaurants, setRestaurants] = useState<IngestRestaurantInput[]>([{ url: '', name: '' }])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [existingRestaurants, setExistingRestaurants] = useState<ExistingRestaurantsResponse | null>(null)
@@ -133,15 +133,17 @@ export default function TeamDecisionPage() {
   // Remove auto-load - content will be loaded on demand when user expands
 
   const addRestaurantField = () => {
-    setRestaurants(prev => [...prev, ''])
+    setRestaurants(prev => [...prev, { url: '', name: '' }])
   }
 
   const removeRestaurantField = (index: number) => {
     setRestaurants(prev => prev.filter((_, i) => i !== index))
   }
 
-  const updateRestaurant = (index: number, value: string) => {
-    setRestaurants(prev => prev.map((url, i) => i === index ? value : url))
+  const updateRestaurant = (index: number, field: keyof IngestRestaurantInput, value: string) => {
+    setRestaurants(prev => prev.map((restaurant, i) => (
+      i === index ? { ...restaurant, [field]: value } : restaurant
+    )))
   }
 
   const resetAgent = () => {
@@ -149,14 +151,19 @@ export default function TeamDecisionPage() {
     setProcessResult(null)
     setProcessError(null)
     setAgentError(null)
-    setRestaurants([''])
+    setRestaurants([{ url: '', name: '' }])
   }
 
   const handleProcessInformation = async (e: React.MouseEvent) => {
     e.preventDefault()
     if (!api || !team) return
 
-    const validRestaurants = restaurants.filter(url => url.trim())
+    const validRestaurants = restaurants
+      .map((restaurant) => ({
+        url: restaurant.url.trim(),
+        name: restaurant.name?.trim() || undefined,
+      }))
+      .filter((restaurant) => restaurant.url)
     if (validRestaurants.length === 0) {
       setProcessError('Please add at least one restaurant URL to process')
       return
@@ -170,7 +177,7 @@ export default function TeamDecisionPage() {
       // Call ingest endpoint to fetch and scrape restaurant data
       const result = await api.post<IngestRestaurantsResponse>('/decision/ingest-restaurants', {
         teamId: teamId,
-        restaurantUrls: validRestaurants,
+        restaurants: validRestaurants,
         forceRescrape: forceRescrape,
       })
       
@@ -314,14 +321,21 @@ export default function TeamDecisionPage() {
             <p className="text-sm text-green-700">Enter restaurant URLs to fetch and scrape menu data</p>
             
             <div className="space-y-3">
-              {restaurants.map((url, index) => (
-                <div key={index} className="flex gap-2">
+              {restaurants.map((restaurant, index) => (
+                <div key={index} className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
+                  <input
+                    type="text"
+                    value={restaurant.name || ''}
+                    onChange={(e) => updateRestaurant(index, 'name', e.target.value)}
+                    placeholder="Restaurant name (optional)"
+                    className="px-3 py-2 border border-green-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 bg-white"
+                  />
                   <input
                     type="url"
-                    value={url}
-                    onChange={(e) => updateRestaurant(index, e.target.value)}
+                    value={restaurant.url}
+                    onChange={(e) => updateRestaurant(index, 'url', e.target.value)}
                     placeholder="https://restaurant-menu-url.com"
-                    className="flex-1 px-3 py-2 border border-green-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 bg-white"
+                    className="px-3 py-2 border border-green-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 bg-white"
                   />
                   {restaurants.length > 1 && (
                     <button
@@ -363,7 +377,7 @@ export default function TeamDecisionPage() {
 
             <Button 
               onClick={handleProcessInformation} 
-              disabled={processing || restaurants.filter(url => url.trim()).length === 0} 
+              disabled={processing || restaurants.filter((restaurant) => restaurant.url.trim()).length === 0} 
               className="rounded-2xl bg-green-600 hover:bg-green-700"
             >
               {processing ? 'Processing Information…' : 'Process Restaurant Information'}
@@ -516,7 +530,7 @@ export default function TeamDecisionPage() {
                         onClick={() => toggleContentExpanded(restaurant.id)}
                         className="flex items-center gap-2 w-full p-3 bg-slate-50 hover:bg-slate-100 rounded-lg border border-slate-200 transition-colors text-left"
                       >
-                        <span className="text-sm font-medium text-slate-700">Raw Scraped Content</span>
+                        <span className="text-sm font-medium text-slate-700">Extracted Menu View</span>
                         {expandedContent[restaurant.id] ? (
                           <ChevronUp className="h-4 w-4 text-slate-500 ml-auto" />
                         ) : (
@@ -526,13 +540,28 @@ export default function TeamDecisionPage() {
                       {expandedContent[restaurant.id] && (
                         <div className="mt-2 p-3 bg-slate-50 rounded-lg border border-slate-200">
                           {viewingContent[restaurant.id] ? (
-                            <pre className="whitespace-pre-wrap break-words text-xs text-slate-600 max-h-96 overflow-y-auto">
-                              {viewingContent[restaurant.id]?.contentMd || 'No content available'}
-                            </pre>
+                            <div className="space-y-3">
+                              <div className="flex flex-wrap gap-2 text-xs">
+                                {viewingContent[restaurant.id]?.meta?.menu_type && (
+                                  <span className="rounded-full bg-slate-200 px-2 py-1 text-slate-700">
+                                    Type: {viewingContent[restaurant.id]?.meta?.menu_type}
+                                  </span>
+                                )}
+                                {Array.isArray(viewingContent[restaurant.id]?.meta?.detected_days) &&
+                                  viewingContent[restaurant.id]?.meta?.detected_days?.map((day: string) => (
+                                    <span key={day} className="rounded-full bg-blue-100 px-2 py-1 text-blue-700">
+                                      {day}
+                                    </span>
+                                  ))}
+                              </div>
+                              <pre className="whitespace-pre-wrap break-words text-xs text-slate-600 max-h-96 overflow-y-auto">
+                                {viewingContent[restaurant.id]?.contentMd || 'No extracted menu available'}
+                              </pre>
+                            </div>
                           ) : restaurant.hasContent ? (
-                            <p className="text-xs text-slate-500 italic">Loading content...</p>
+                            <p className="text-xs text-slate-500 italic">Loading extracted menu...</p>
                           ) : (
-                            <p className="text-xs text-red-500 italic">No content scraped yet. Please process this restaurant.</p>
+                            <p className="text-xs text-red-500 italic">No extracted menu yet. Please process this restaurant.</p>
                           )}
                         </div>
                       )}

@@ -711,6 +711,7 @@ class WebScraper:
                             'duration': duration,
                             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
                             'pdf_count': 1 if pdf_result['success'] else 0,
+                            'pdf_urls': [url] if pdf_result['success'] else [],
                             'pdf_metadata': [pdf_result.get('metadata', {})] if pdf_result['success'] else [],
                             'scrape_type': 'pdf_content_type'
                         }
@@ -743,6 +744,7 @@ class WebScraper:
                 'duration': duration,
                 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'pdf_count': 1 if pdf_result['success'] else 0,
+                'pdf_urls': [url] if pdf_result['success'] else [],
                 'pdf_metadata': [pdf_result.get('metadata', {})] if pdf_result['success'] else [],
                 'scrape_type': 'pdf_extension'
             }
@@ -868,6 +870,7 @@ class WebScraper:
                     'status_code': getattr(result, 'status_code', None),
                     'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
                     'pdf_count': len(pdf_content),
+                    'pdf_urls': list(pdf_urls),
                     'pdf_metadata': pdf_metadata,
                     'scrape_type': 'html_with_embedded_pdfs' if pdf_content else 'html_only'
                 }

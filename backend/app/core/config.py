@@ -34,8 +34,10 @@ class Settings(BaseSettings):
     # LLM provider selection (kept minimal for hackathon prep)
     LLM_PROVIDER: str = Field(default="openai", description="LLM provider: openai | vertexai")
     OPENAI_MODEL: str = Field(default="gpt-4o-mini", description="Default OpenAI chat model")
+    OPENAI_MENU_MODEL: str = Field(default="gpt-4o-mini", description="OpenAI model for menu extraction")
     VERTEX_MODEL: str = Field(default="gemini-2.5-pro", description="Default Vertex chat model")
     OPENAI_API_KEY: str | None = Field(default=None, description="OpenAI API key")
+    MENU_SCRAPER: str = Field(default="openai", description="Menu extraction mode: openai | legacy")
 
     # Google Maps Platform
     GOOGLE_MAPS_SERVER_API_KEY: str | None = Field(

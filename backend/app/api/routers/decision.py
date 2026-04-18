@@ -4,6 +4,8 @@ from typing import List, Dict, Any
 from datetime import datetime
 from urllib.parse import urlparse
 import math
+import httpx
+from bs4 import BeautifulSoup
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select
@@ -11,12 +13,15 @@ from sqlmodel import Session, select
 from ...api.deps import get_current_user, get_db_session
 from ...db.models import User, Restaurant, RestaurantDocument, Team, TeamMembership, DecisionRun, CacheStrategy, TeamRestaurant, Notification
 from ...scraping.scraper import scrape_url
+from ...scraping.simple_scraper import scrape_url_simple
 import logging
 from ...decision.agent import run_decision_agent
 from ...decision.menu_analyzer import extract_menu_metadata
+from ...core.config import settings
 from ...decision.schemas import (
     AgentDecisionRequest,
     AgentDecisionResponse,
+    IngestRestaurantInput,
     IngestRestaurantsRequest,
     IngestRestaurantsResponse,
     ExistingRestaurantsResponse,
@@ -26,6 +31,11 @@ from ...integrations.google_places import (
     GooglePlacesAPIError,
     GooglePlacesConfigError,
     search_places_by_text,
+)
+from ...integrations.openai_menu_extractor import (
+    OpenAIMenuExtractorConfigError,
+    OpenAIMenuExtractorError,
+    extract_menu_with_openai,
 )
 from ...schemas import DecisionRunRead
 
@@ -61,6 +71,70 @@ def _straight_line_distance_km(
     )
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return radius_km * c
+
+
+def _use_legacy_menu_scraper() -> bool:
+    return (settings.MENU_SCRAPER or "").strip().upper() == "LEGACY"
+
+
+def _url_looks_like_pdf(url: str) -> bool:
+    return url.lower().endswith(".pdf")
+
+
+async def _url_returns_pdf_content_type(url: str) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            async with client.stream(
+                "GET",
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "application/pdf,text/html,*/*",
+                },
+            ) as response:
+                content_type = (response.headers.get("content-type") or "").lower()
+                return "application/pdf" in content_type
+    except Exception:
+        return False
+
+
+async def _fetch_openai_source_for_html(url: str) -> dict[str, Any]:
+    simple_result = await scrape_url_simple(url)
+    if not simple_result.get("success"):
+        return await scrape_url(url)
+
+    pdf_urls: list[str] = []
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0"},
+        ) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            for tag in soup.find_all(["a", "iframe", "embed", "object"]):
+                candidate = (
+                    tag.get("href")
+                    or tag.get("src")
+                    or tag.get("data")
+                )
+                if not candidate:
+                    continue
+                candidate = candidate.strip()
+                if ".pdf" in candidate.lower() and candidate not in pdf_urls:
+                    pdf_urls.append(candidate)
+    except Exception:
+        pdf_urls = []
+
+    if simple_result.get("content_length", 0) < 400 and not pdf_urls:
+        browser_result = await scrape_url(url)
+        if browser_result.get("success"):
+            return browser_result
+
+    simple_result["pdf_urls"] = pdf_urls
+    return simple_result
 
 
 def _should_rescrape_restaurant(team_restaurant: TeamRestaurant, latest_doc: RestaurantDocument | None) -> tuple[bool, str]:
@@ -129,6 +203,7 @@ def _guess_name_from_content(content: str | None) -> str | None:
 
 def _build_places_query(
     *,
+    team: Team | None,
     restaurant: Restaurant,
     latest_doc: RestaurantDocument | None,
     scraped_content: str | None = None,
@@ -139,13 +214,16 @@ def _build_places_query(
         or _guess_name_from_content(latest_doc.content_md if latest_doc else None)
         or _guess_name_from_url(restaurant.url)
     )
-
-    return " ".join(part for part in [name_candidate, "restaurant"] if part).strip()
+    location_hint = (team.location or "").strip() if team else ""
+    return " ".join(
+        part for part in [name_candidate, "restaurant", location_hint] if part
+    ).strip()
 
 
 async def _enrich_restaurant_with_google_maps(
     *,
     session: Session,
+    team: Team | None,
     restaurant: Restaurant,
     latest_doc: RestaurantDocument | None,
     scraped_content: str | None = None,
@@ -156,6 +234,7 @@ async def _enrich_restaurant_with_google_maps(
         return
 
     query = _build_places_query(
+        team=team,
         restaurant=restaurant,
         latest_doc=latest_doc,
         scraped_content=scraped_content,
@@ -186,6 +265,92 @@ async def _enrich_restaurant_with_google_maps(
         restaurant.display_name = google_maps["display_name"]
 
     session.add(restaurant)
+
+
+def _build_legacy_menu_document(text_content: str) -> tuple[str, dict[str, Any]]:
+    menu_metadata = extract_menu_metadata(text_content)
+    structured_menu_text = menu_metadata.get("structured_menu_text") or text_content
+    meta = {
+        "menu_extractor": menu_metadata.get("extractor", "legacy"),
+        "content_length": len(structured_menu_text),
+        "raw_content_length": len(text_content),
+        "menu_type": menu_metadata.get("menu_type", "unknown"),
+        "detected_days": menu_metadata.get("detected_days", []),
+        "menu_confidence": menu_metadata.get("confidence", 0.0),
+        "day_sections": menu_metadata.get("day_sections", {}),
+        "static_menu_lines": menu_metadata.get("static_menu_lines", []),
+        "structured_line_count": menu_metadata.get("structured_line_count", 0),
+        "has_prices": menu_metadata.get("has_prices", False),
+        "price_count": menu_metadata.get("price_count", 0),
+    }
+    return structured_menu_text, meta
+
+
+async def _build_menu_document_content(
+    *,
+    restaurant: Restaurant,
+    provided_name: str | None,
+    scrape_result: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    raw_text = scrape_result.get("content", "") or ""
+    if _use_legacy_menu_scraper():
+        return _build_legacy_menu_document(raw_text)
+
+    try:
+        openai_result = await extract_menu_with_openai(
+            restaurant_url=restaurant.url,
+            restaurant_name=provided_name or restaurant.display_name,
+            scraped_text=raw_text,
+            pdf_urls=scrape_result.get("pdf_urls") or [],
+        )
+        structured_text = openai_result.get("structured_menu_text") or raw_text
+        meta = {
+            "menu_extractor": openai_result.get("extractor", "openai"),
+            "content_length": len(structured_text),
+            "raw_content_length": len(raw_text),
+            "menu_type": openai_result.get("menu_type", "unknown"),
+            "detected_days": openai_result.get("detected_days", []),
+            "menu_confidence": openai_result.get("confidence", 0.0),
+            "day_sections": openai_result.get("day_sections", {}),
+            "static_menu_lines": openai_result.get("static_menu_lines", []),
+            "structured_line_count": openai_result.get("structured_line_count", 0),
+        }
+        has_prices = "€" in structured_text or bool(meta["static_menu_lines"])
+        meta["has_prices"] = has_prices
+        meta["price_count"] = structured_text.count("€")
+        return structured_text, meta
+    except (OpenAIMenuExtractorConfigError, OpenAIMenuExtractorError) as exc:
+        logger.warning("[ingest] OpenAI menu extraction failed for %s: %s", restaurant.url, exc)
+        return _build_legacy_menu_document(raw_text)
+
+
+async def _build_menu_document_from_pdf_url(
+    *,
+    restaurant: Restaurant,
+    provided_name: str | None,
+    pdf_url: str,
+) -> tuple[str, dict[str, Any]]:
+    openai_result = await extract_menu_with_openai(
+        restaurant_url=restaurant.url,
+        restaurant_name=provided_name or restaurant.display_name,
+        scraped_text="",
+        pdf_urls=[pdf_url],
+    )
+    structured_text = openai_result.get("structured_menu_text") or ""
+    meta = {
+        "menu_extractor": openai_result.get("extractor", "openai"),
+        "content_length": len(structured_text),
+        "raw_content_length": 0,
+        "menu_type": openai_result.get("menu_type", "unknown"),
+        "detected_days": openai_result.get("detected_days", []),
+        "menu_confidence": openai_result.get("confidence", 0.0),
+        "day_sections": openai_result.get("day_sections", {}),
+        "static_menu_lines": openai_result.get("static_menu_lines", []),
+        "structured_line_count": openai_result.get("structured_line_count", 0),
+        "has_prices": "€" in structured_text or bool(openai_result.get("static_menu_lines", [])),
+        "price_count": structured_text.count("€"),
+    }
+    return structured_text, meta
 
 
 @router.post("/ingest-restaurants", response_model=IngestRestaurantsResponse)
@@ -220,18 +385,37 @@ async def ingest_restaurants(
     scraped_count = 0
     cached_count = 0
     processing_details = []
+    ingest_entries: List[IngestRestaurantInput] = []
 
-    for url in payload.restaurant_urls:
+    if payload.restaurants:
+        ingest_entries.extend(payload.restaurants)
+    elif payload.restaurant_urls:
+        ingest_entries.extend(IngestRestaurantInput(url=url) for url in payload.restaurant_urls)
+
+    if not ingest_entries:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide at least one restaurant URL",
+        )
+
+    for entry in ingest_entries:
+        url = entry.url
+        provided_name = (entry.name or "").strip() or None
         scraped_content: str | None = None
 
         # 1. Get or create Restaurant
         r = session.exec(select(Restaurant).where(Restaurant.url == url)).first()
         if not r:
-            r = Restaurant(url=url)
+            r = Restaurant(url=url, display_name=provided_name)
             session.add(r)
             session.commit()
             session.refresh(r)
             created_count += 1
+        elif provided_name and not r.display_name:
+            r.display_name = provided_name
+            session.add(r)
+            session.commit()
+            session.refresh(r)
 
         # 2. Get or create TeamRestaurant (team-specific restaurant source)
         team_restaurant = session.exec(
@@ -246,12 +430,18 @@ async def ingest_restaurants(
                 team_id=payload.team_id,
                 restaurant_id=r.id,
                 added_by_user_id=current_user.id,
-                cache_strategy=CacheStrategy.auto
+                cache_strategy=CacheStrategy.auto,
+                display_name=provided_name,
             )
             session.add(team_restaurant)
             session.commit()
             session.refresh(team_restaurant)
             logger.info("[ingest] Created TeamRestaurant for team=%s, restaurant=%s", payload.team_id, r.id)
+        elif provided_name and team_restaurant.display_name != provided_name:
+            team_restaurant.display_name = provided_name
+            session.add(team_restaurant)
+            session.commit()
+            session.refresh(team_restaurant)
 
         # 3. Get latest document for this restaurant
         latest_doc = session.exec(
@@ -269,61 +459,96 @@ async def ingest_restaurants(
         if should_rescrape:
             # Attempt to scrape and persist a fresh RestaurantDocument
             try:
-                result = await scrape_url(r.url)
-                if result['success']:
+                result: dict[str, Any] | None = None
+                direct_pdf_url: str | None = None
+
+                if not _use_legacy_menu_scraper():
+                    if _url_looks_like_pdf(r.url) or await _url_returns_pdf_content_type(r.url):
+                        direct_pdf_url = r.url
+
+                if direct_pdf_url:
+                    structured_menu_text, menu_meta = await _build_menu_document_from_pdf_url(
+                        restaurant=r,
+                        provided_name=provided_name,
+                        pdf_url=direct_pdf_url,
+                    )
+                    meta = {
+                        'duration': None,
+                        'content_length': len(structured_menu_text),
+                        'raw_content_length': 0,
+                        'timestamp': datetime.utcnow().isoformat(),
+                        'status_code': None,
+                        'pdf_count': 1,
+                        'pdf_urls': [direct_pdf_url],
+                        'word_count': len(structured_menu_text.split()) if structured_menu_text else 0,
+                        **menu_meta,
+                    }
+                    scraped_content = structured_menu_text
+                else:
+                    result = await (
+                        scrape_url(r.url)
+                        if _use_legacy_menu_scraper()
+                        else _fetch_openai_source_for_html(r.url)
+                    )
+                    if not result['success']:
+                        processing_details.append({
+                            'url': url,
+                            'action': 'failed',
+                            'reason': f"Scraping failed: {result.get('error', 'Unknown error')}"
+                        })
+                        logger.warning("[ingest] Scraping failed for %s: %s", r.url, result.get('error', 'Unknown error'))
+                        continue
+
                     text_content = result['content']
                     scraped_content = text_content
-                    
-                    # Analyze menu content to detect type and temporal patterns
-                    menu_metadata = extract_menu_metadata(text_content)
-                    
-                    # Combine scraping metadata with menu analysis
+                    structured_menu_text, menu_meta = await _build_menu_document_content(
+                        restaurant=r,
+                        provided_name=provided_name,
+                        scrape_result=result,
+                    )
                     meta = {
                         'duration': result.get('duration'),
-                        'content_length': result.get('content_length'),
+                        'content_length': len(structured_menu_text),
+                        'raw_content_length': len(text_content),
                         'timestamp': result.get('timestamp'),
                         'status_code': result.get('status_code'),
                         'pdf_count': result.get('pdf_count', 0),
+                        'pdf_urls': result.get('pdf_urls', []),
                         'word_count': result.get('word_count', 0),
-                        'menu_type': menu_metadata.get('menu_type', 'unknown'),
-                        'detected_days': menu_metadata.get('detected_days', []),
-                        'menu_confidence': menu_metadata.get('confidence', 0.0),
-                        'has_prices': menu_metadata.get('has_prices', False),
-                        'price_count': menu_metadata.get('price_count', 0),
+                        **menu_meta,
                     }
-                    doc = RestaurantDocument(restaurant_id=r.id, content_md=text_content, meta=meta)
-                    session.add(doc)
-                    
-                    # Update team-specific cache tracking
-                    team_restaurant.last_scraped_at = datetime.utcnow()
-                    session.add(team_restaurant)
 
-                    await _enrich_restaurant_with_google_maps(
-                        session=session,
-                        restaurant=r,
-                        latest_doc=latest_doc,
-                        scraped_content=scraped_content,
-                        force_refresh=payload.force_rescrape,
-                    )
-                    
-                    session.commit()
-                    scraped_count += 1
-                    processing_details.append({
-                        'url': url,
-                        'action': 'scraped',
-                        'reason': reason,
-                        'cache_strategy': team_restaurant.cache_strategy,
-                        'menu_type': menu_metadata.get('menu_type', 'unknown')
-                    })
-                    logger.info("[ingest] Stored new RestaurantDocument id=%s for restaurant id=%s (reason: %s, menu_type: %s)", 
-                               doc.id, r.id, reason, menu_metadata.get('menu_type', 'unknown'))
-                else:
-                    processing_details.append({
-                        'url': url,
-                        'action': 'failed',
-                        'reason': f"Scraping failed: {result.get('error', 'Unknown error')}"
-                    })
-                    logger.warning("[ingest] Scraping failed for %s: %s", r.url, result.get('error', 'Unknown error'))
+                doc = RestaurantDocument(
+                    restaurant_id=r.id,
+                    content_md=structured_menu_text,
+                    meta=meta,
+                )
+                session.add(doc)
+                
+                # Update team-specific cache tracking
+                team_restaurant.last_scraped_at = datetime.utcnow()
+                session.add(team_restaurant)
+
+                await _enrich_restaurant_with_google_maps(
+                    session=session,
+                    team=team,
+                    restaurant=r,
+                    latest_doc=latest_doc,
+                    scraped_content=scraped_content,
+                    force_refresh=payload.force_rescrape,
+                )
+                
+                session.commit()
+                scraped_count += 1
+                processing_details.append({
+                    'url': url,
+                    'action': 'scraped',
+                    'reason': reason,
+                    'cache_strategy': team_restaurant.cache_strategy,
+                    'menu_type': meta.get('menu_type', 'unknown')
+                })
+                logger.info("[ingest] Stored new RestaurantDocument id=%s for restaurant id=%s (reason: %s, menu_type: %s)", 
+                           doc.id, r.id, reason, meta.get('menu_type', 'unknown'))
             except Exception as e:
                 processing_details.append({
                     'url': url,
@@ -334,6 +559,7 @@ async def ingest_restaurants(
         else:
             await _enrich_restaurant_with_google_maps(
                 session=session,
+                team=team,
                 restaurant=r,
                 latest_doc=latest_doc,
                 force_refresh=payload.force_rescrape,
@@ -357,7 +583,7 @@ async def ingest_restaurants(
 
     return IngestRestaurantsResponse(
         restaurant_ids=restaurant_ids,
-        processed_count=len(payload.restaurant_urls),
+        processed_count=len(ingest_entries),
         created_count=created_count,
         scraped_count=scraped_count,
         cached_count=cached_count,
