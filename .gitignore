@@ -13,3 +13,12 @@ venv-linux
 
 # Next.js build output
 **/.next/
+
+# Local database files
+*.db
+*.db-*
+*.db.lock
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
