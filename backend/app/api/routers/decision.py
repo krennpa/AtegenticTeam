@@ -23,6 +23,8 @@ from ...preferences.service import aggregate_team_preferences
 from ...decision.schemas import (
     AgentDecisionRequest,
     AgentDecisionResponse,
+    ConfirmDecisionChoiceRequest,
+    ConfirmDecisionChoiceResponse,
     DiscoverRestaurantsRequest,
     DiscoverRestaurantsResponse,
     IngestRestaurantInput,
@@ -53,6 +55,36 @@ from ...schemas import DecisionRunRead
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _create_team_decision_notifications(
+    *,
+    session: Session,
+    team_id: str,
+    organizer_user: User,
+    team_name: str,
+    decision_run_id: str,
+    restaurant_name: str,
+) -> None:
+    team_members = session.exec(
+        select(TeamMembership).where(
+            TeamMembership.team_id == team_id,
+            TeamMembership.is_active == True,
+            TeamMembership.user_id != organizer_user.id,
+        )
+    ).all()
+
+    for member in team_members:
+        session.add(
+            Notification(
+                user_id=member.user_id,
+                type="team_decision",
+                title=f"New decision in {team_name}",
+                message=f"{organizer_user.display_name or organizer_user.email} made a decision: {restaurant_name}",
+                team_id=team_id,
+                decision_run_id=decision_run_id,
+            )
+        )
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -1219,6 +1251,11 @@ async def agent_decide(
             "recommended_dish": result.get("recommended_dish", ""),
             "explanation_md": result.get("explanation_md", ""),
             "raw_text": result.get("raw_text", ""),
+            "top_candidates": result.get("top_candidates") or [],
+            "fairness_summary": result.get("fairness_summary"),
+            "tie_break_available": bool(result.get("tie_break_available")),
+            "tie_break_mode": result.get("tie_break_mode"),
+            "tie_break_transcript": result.get("tie_break_transcript") or [],
         }
         internal_diagnostics = result.get("internal_diagnostics") or {}
         logger.info("Agent decision completed for team_id=%s.", payload.team_id)
@@ -1272,27 +1309,15 @@ async def agent_decide(
         session.commit()
         session.refresh(decision_run)
         
-        # 6. Create notifications for all team members (except the organizer)
-        team_members = session.exec(
-            select(TeamMembership).where(
-                TeamMembership.team_id == payload.team_id,
-                TeamMembership.is_active == True,
-                TeamMembership.user_id != current_user.id,  # Exclude organizer
-            )
-        ).all()
-        
         restaurant_name = public_result.get("recommendation_restaurant_name", "a restaurant")
-        for member in team_members:
-            notification = Notification(
-                user_id=member.user_id,
-                type="team_decision",
-                title=f"New decision in {team.name}",
-                message=f"{current_user.display_name or current_user.email} made a decision: {restaurant_name}",
-                team_id=payload.team_id,
-                decision_run_id=decision_run.id,
-            )
-            session.add(notification)
-        
+        _create_team_decision_notifications(
+            session=session,
+            team_id=payload.team_id,
+            organizer_user=current_user,
+            team_name=team.name,
+            decision_run_id=decision_run.id,
+            restaurant_name=restaurant_name,
+        )
         session.commit()
         
         return public_result
@@ -1302,6 +1327,78 @@ async def agent_decide(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"An error occurred during the decision-making process: {e}",
         )
+
+
+@router.post("/confirm-choice", response_model=ConfirmDecisionChoiceResponse)
+def confirm_decision_choice(
+    payload: ConfirmDecisionChoiceRequest,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db_session),
+):
+    team = session.get(Team, payload.team_id)
+    if not team or not team.is_active:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    membership = session.exec(
+        select(TeamMembership).where(
+            TeamMembership.team_id == payload.team_id,
+            TeamMembership.user_id == current_user.id,
+            TeamMembership.is_active == True,
+        )
+    ).first()
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this team.",
+        )
+
+    matched_restaurant_ids: list[str] = []
+    if payload.restaurant_url:
+        matched_restaurants = session.exec(
+            select(Restaurant).where(Restaurant.url == payload.restaurant_url)
+        ).all()
+        matched_restaurant_ids = [restaurant.id for restaurant in matched_restaurants]
+
+    result_payload = {
+        "recommendation_restaurant_name": payload.restaurant_name,
+        "recommendation_restaurant_url": payload.restaurant_url,
+        "recommended_dish": payload.recommended_dish or "",
+        "explanation_md": payload.rationale_md or "Final team choice confirmed by a participant.",
+        "raw_text": payload.rationale_md or payload.restaurant_name,
+        "top_candidates": [],
+        "fairness_summary": None,
+        "tie_break_available": False,
+        "tie_break_mode": payload.source or "manual_choice",
+        "tie_break_transcript": [],
+        "selection_source": payload.source or "manual_choice",
+    }
+
+    decision_run = DecisionRun(
+        organizer_user_id=current_user.id,
+        team_id=payload.team_id,
+        participant_profile_ids=[],
+        restaurant_ids=matched_restaurant_ids,
+        result=result_payload,
+    )
+    session.add(decision_run)
+    session.commit()
+    session.refresh(decision_run)
+
+    _create_team_decision_notifications(
+        session=session,
+        team_id=payload.team_id,
+        organizer_user=current_user,
+        team_name=team.name,
+        decision_run_id=decision_run.id,
+        restaurant_name=payload.restaurant_name,
+    )
+    session.commit()
+
+    return ConfirmDecisionChoiceResponse(
+        decision_run_id=decision_run.id,
+        restaurant_name=payload.restaurant_name,
+        message=f"{payload.restaurant_name} has been locked in for the team.",
+    )
 
 
 def _extract_restaurant_name_from_url(url: str) -> str:

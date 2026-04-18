@@ -33,6 +33,62 @@ def _build_raw_text(result: dict[str, Any]) -> str:
     )
 
 
+def _build_top_candidates_from_menus(menus: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    top_candidates: list[dict[str, Any]] = []
+    for index, menu in enumerate(menus[:3], start=1):
+        restaurant_name = str(menu.get("restaurant_name") or menu.get("restaurant_url") or "").strip()
+        candidate_url = menu.get("restaurant_url")
+        restaurant_url = str(candidate_url).strip() if isinstance(candidate_url, str) else None
+        top_candidates.append(
+            {
+                "rank": index,
+                "restaurant_name": restaurant_name,
+                "restaurant_url": restaurant_url,
+                "recommended_dish": _extract_first_dish(str(menu.get("menu_markdown") or "")),
+                "rationale_md": "Retained as a viable option based on available team and menu context.",
+            }
+        )
+    return top_candidates
+
+
+def _build_fallback_tie_break_transcript(
+    menus: list[dict[str, Any]],
+    team_decision_context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    top_candidates = _build_top_candidates_from_menus(menus)[:2]
+    if len(top_candidates) < 2:
+        return []
+    member_names = [
+        str(member.get("display_name") or "").strip()
+        for member in (team_decision_context.get("members") or [])
+        if isinstance(member, dict) and str(member.get("display_name") or "").strip()
+    ]
+    first_speaker = member_names[0] if member_names else "Alex"
+    second_speaker = member_names[1] if len(member_names) > 1 else "Sam"
+    first = top_candidates[0]
+    second = top_candidates[1]
+    return [
+        {
+            "speaker_label": first_speaker,
+            "stance": "member",
+            "utterance": f"{first['restaurant_name']} leads on direct menu fit, especially with {first.get('recommended_dish') or 'its strongest dish'}.",
+            "round_index": 1,
+        },
+        {
+            "speaker_label": second_speaker,
+            "stance": "member",
+            "utterance": f"{second['restaurant_name']} remains a valid alternative if the team wants a broader compromise.",
+            "round_index": 1,
+        },
+        {
+            "speaker_label": "Moderator",
+            "stance": "resolution",
+            "utterance": f"Tie-Break resolves in favor of {first['restaurant_name']} because it remains the clearest overall fit today.",
+            "round_index": 2,
+        },
+    ]
+
+
 def _build_fallback_result(menus: list[dict[str, Any]], reason: str) -> dict[str, Any]:
     candidate = next((menu for menu in menus if menu.get("menu_markdown")), None)
     if not candidate and menus:
@@ -59,6 +115,15 @@ def _build_fallback_result(menus: list[dict[str, Any]], reason: str) -> dict[str
         "recommendation_restaurant_url": restaurant_url,
         "recommended_dish": dish,
         "explanation_md": explanation,
+        "top_candidates": _build_top_candidates_from_menus(menus),
+        "fairness_summary": {
+            "policy": "max_min_fairness",
+            "summary_md": "Fallback decision used available menu context without a full fairness-aware ranking pass.",
+            "balance_note": None,
+        },
+        "tie_break_available": False,
+        "tie_break_mode": "tie_break",
+        "tie_break_transcript": [],
     }
     result["raw_text"] = _build_raw_text(result)
     result["internal_diagnostics"] = {
@@ -76,6 +141,7 @@ async def run_decision_agent(request: dict[str, Any], db_session: Session) -> di
     """
     team_id = str(request.get("team_id") or "")
     restaurant_ids = request.get("restaurant_ids") or []
+    decision_mode = str(request.get("decision_mode") or "standard").strip().lower()
     user_question = str(
         request.get("user_question")
         or "Based on the team's needs and the restaurant menus, what is the best lunch option? Please provide one restaurant and one specific dish recommendation, along with a brief explanation."
@@ -114,11 +180,27 @@ async def run_decision_agent(request: dict[str, Any], db_session: Session) -> di
             current_day=current_day,
             current_date=current_date,
             current_time=current_time,
+            decision_mode=decision_mode,
         )
         return result
     except OpenAIDecisionJudgeConfigError as exc:
-        return _build_fallback_result(menus, f"Decision judge misconfigured: {exc}")
+        fallback = _build_fallback_result(menus, f"Decision judge misconfigured: {exc}")
+        if decision_mode == "tie_break":
+            fallback["tie_break_available"] = len((fallback.get("top_candidates") or [])) >= 2
+            fallback["tie_break_mode"] = "explicit"
+            fallback["tie_break_transcript"] = _build_fallback_tie_break_transcript(menus, team_decision_context)
+        return fallback
     except OpenAIDecisionJudgeError as exc:
-        return _build_fallback_result(menus, f"Decision judge failed: {exc}")
+        fallback = _build_fallback_result(menus, f"Decision judge failed: {exc}")
+        if decision_mode == "tie_break":
+            fallback["tie_break_available"] = len((fallback.get("top_candidates") or [])) >= 2
+            fallback["tie_break_mode"] = "explicit"
+            fallback["tie_break_transcript"] = _build_fallback_tie_break_transcript(menus, team_decision_context)
+        return fallback
     except Exception as exc:
-        return _build_fallback_result(menus, f"Unexpected decision judge failure: {exc}")
+        fallback = _build_fallback_result(menus, f"Unexpected decision judge failure: {exc}")
+        if decision_mode == "tie_break":
+            fallback["tie_break_available"] = len((fallback.get("top_candidates") or [])) >= 2
+            fallback["tie_break_mode"] = "explicit"
+            fallback["tie_break_transcript"] = _build_fallback_tie_break_transcript(menus, team_decision_context)
+        return fallback

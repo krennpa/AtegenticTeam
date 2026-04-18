@@ -5,7 +5,29 @@ from ..schemas import CamelModel
 class AgentDecisionRequest(CamelModel):
     team_id: str
     restaurant_ids: List[str]
+    decision_mode: Optional[str] = "standard"
     user_question: Optional[str] = "Based on the team's needs and the restaurant menus, what is the best lunch option? Please provide one restaurant and one specific dish recommendation, along with a brief explanation."
+
+
+class AgentDecisionCandidate(CamelModel):
+    rank: int
+    restaurant_name: str
+    restaurant_url: Optional[str] = None
+    recommended_dish: Optional[str] = None
+    rationale_md: str
+
+
+class AgentDecisionFairnessSummary(CamelModel):
+    policy: str
+    summary_md: str
+    balance_note: Optional[str] = None
+
+
+class AgentDecisionTieBreakTurn(CamelModel):
+    speaker_label: str
+    stance: str
+    utterance: str
+    round_index: int
 
 
 class AgentDecisionResponse(CamelModel):
@@ -15,6 +37,26 @@ class AgentDecisionResponse(CamelModel):
     recommended_dish: str
     explanation_md: str
     raw_text: str
+    top_candidates: List[AgentDecisionCandidate] = []
+    fairness_summary: Optional[AgentDecisionFairnessSummary] = None
+    tie_break_available: bool = False
+    tie_break_mode: Optional[str] = None
+    tie_break_transcript: List[AgentDecisionTieBreakTurn] = []
+
+
+class ConfirmDecisionChoiceRequest(CamelModel):
+    team_id: str
+    restaurant_name: str
+    restaurant_url: Optional[str] = None
+    recommended_dish: Optional[str] = None
+    rationale_md: Optional[str] = None
+    source: Optional[str] = "manual_choice"
+
+
+class ConfirmDecisionChoiceResponse(CamelModel):
+    decision_run_id: str
+    restaurant_name: str
+    message: str
 
 
 class IngestRestaurantInput(CamelModel):

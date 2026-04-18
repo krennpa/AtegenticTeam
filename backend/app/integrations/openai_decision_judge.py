@@ -26,6 +26,55 @@ DECISION_RESPONSE_SCHEMA: dict[str, Any] = {
         "recommendation_restaurant_url": {"type": "string"},
         "recommended_dish": {"type": "string"},
         "explanation_md": {"type": "string"},
+        "top_candidates": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "rank": {"type": "integer"},
+                    "restaurant_name": {"type": "string"},
+                    "restaurant_url": {"type": "string"},
+                    "recommended_dish": {"type": "string"},
+                    "rationale_md": {"type": "string"},
+                },
+                "required": [
+                    "rank",
+                    "restaurant_name",
+                    "restaurant_url",
+                    "recommended_dish",
+                    "rationale_md",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "fairness_summary": {
+            "type": "object",
+            "properties": {
+                "policy": {"type": "string"},
+                "summary_md": {"type": "string"},
+                "balance_note": {"type": "string"},
+            },
+            "required": ["policy", "summary_md", "balance_note"],
+            "additionalProperties": False,
+        },
+        "tie_break_available": {"type": "boolean"},
+        "tie_break_mode": {"type": "string"},
+        "tie_break_transcript": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "speaker_label": {"type": "string"},
+                    "stance": {"type": "string"},
+                    "utterance": {"type": "string"},
+                    "round_index": {"type": "integer"},
+                },
+                "required": ["speaker_label", "stance", "utterance", "round_index"],
+                "additionalProperties": False,
+            },
+        },
         "decision_confidence": {"type": "number"},
         "diagnostics": {
             "type": "object",
@@ -49,6 +98,11 @@ DECISION_RESPONSE_SCHEMA: dict[str, Any] = {
         "recommendation_restaurant_url",
         "recommended_dish",
         "explanation_md",
+        "top_candidates",
+        "fairness_summary",
+        "tie_break_available",
+        "tie_break_mode",
+        "tie_break_transcript",
         "decision_confidence",
         "diagnostics",
     ],
@@ -146,10 +200,19 @@ def _build_restaurant_payload(menus: list[dict[str, Any]]) -> list[dict[str, Any
 
 
 def _build_raw_text(result: dict[str, Any]) -> str:
+    top_candidates = result.get("top_candidates") or []
+    candidate_lines = []
+    for candidate in top_candidates[:3]:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_lines.append(
+            f"{candidate.get('rank', '?')}. {candidate.get('restaurant_name', '')} - {candidate.get('recommended_dish', '')}"
+        )
     return (
         f"**Recommendation**: {result.get('recommendation_restaurant_name', '')}\n"
         f"**Dish**: {result.get('recommended_dish', '')}\n"
-        f"**Reasoning**: {result.get('explanation_md', '')}"
+        f"**Reasoning**: {result.get('explanation_md', '')}\n"
+        + (f"**Top Candidates**:\n" + "\n".join(candidate_lines) if candidate_lines else "")
     )
 
 
@@ -161,6 +224,7 @@ async def run_openai_decision_judge(
     current_day: str,
     current_date: str,
     current_time: str,
+    decision_mode: str = "standard",
 ) -> dict[str, Any]:
     api_key = _require_api_key()
     model = settings.OPENAI_DECISION_MODEL or settings.OPENAI_MODEL
@@ -175,9 +239,21 @@ async def run_openai_decision_judge(
         "Important policy:\n"
         "- Hard constraints from members (allergies and dietary restrictions) are non-negotiable.\n"
         "- For soft preference conflicts, apply max_min_fairness first, then optimize overall fit.\n"
+        "- Use fairness_memory explicitly when deciding whether to diversify away from repeated recent winners.\n"
+        "- If fairness_memory shows winner concentration or repeat pressure, mention that in fairness_summary.\n"
         "- Consider menu freshness and today's day availability.\n"
         "- Use distance only as a soft tie-breaker.\n"
+        "- Return a ranked top 3, then choose one final winner.\n"
         "- Keep output concise and suitable for end-user display.\n"
+        "- If decision_mode is tie_break, always set tie_break_available to true whenever at least 2 candidates are viable.\n"
+        "- In standard mode, you may still set tie_break_available when the top options remain genuinely debatable.\n"
+        "- If tie_break_available is true, generate a short tie-break transcript.\n"
+        "- The tie-break transcript should feel like a compact debate between teammate personas.\n"
+        "- Use actual teammate display names from team_decision_context.members as speaker_label whenever available.\n"
+        "- Do not use generic labels like pro, con, neutral, or speaker 1.\n"
+        "- Each named speaker should sound distinct and argue from their own preferences or constraints.\n"
+        "- Use at most 2 rounds total and keep the transcript under 8 utterances.\n"
+        "- End the transcript with a moderator-style final turn that resolves the tie-break.\n"
     )
 
     decision_input = {
@@ -187,6 +263,7 @@ async def run_openai_decision_judge(
             "time": current_time,
         },
         "policy": "max_min_fairness",
+        "decision_mode": decision_mode,
         "user_question": user_question,
         "team_decision_context": team_decision_context,
         "restaurants": restaurant_payload,
@@ -206,6 +283,10 @@ async def run_openai_decision_judge(
                         "type": "input_text",
                         "text": (
                             "Decide the best restaurant and one dish.\n"
+                            "Return a top 3 ranking with short rationale per candidate.\n"
+                            "Include fairness summary and tie-break metadata.\n"
+                            "If tie_break_available is true, include a theatrical but concise tie-break transcript.\n"
+                            "If decision_mode is tie_break, treat this as an explicit user-requested Tie-Break round.\n"
                             "Return only JSON matching the required schema.\n\n"
                             f"{json.dumps(decision_input, ensure_ascii=True)}"
                         ),
@@ -253,7 +334,35 @@ async def run_openai_decision_judge(
         ),
         "recommended_dish": str(parsed.get("recommended_dish") or "").strip(),
         "explanation_md": str(parsed.get("explanation_md") or "").strip(),
+        "top_candidates": [],
+        "fairness_summary": {
+            "policy": "max_min_fairness",
+            "summary_md": "",
+            "balance_note": "",
+        },
+        "tie_break_available": bool(parsed.get("tie_break_available")),
+        "tie_break_mode": str(parsed.get("tie_break_mode") or "").strip() or None,
+        "tie_break_transcript": parsed.get("tie_break_transcript") or [],
     }
+    for candidate in parsed.get("top_candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        result["top_candidates"].append(
+            {
+                "rank": int(candidate.get("rank") or len(result["top_candidates"]) + 1),
+                "restaurant_name": str(candidate.get("restaurant_name") or "").strip(),
+                "restaurant_url": _normalize_url(candidate.get("restaurant_url")),
+                "recommended_dish": str(candidate.get("recommended_dish") or "").strip() or None,
+                "rationale_md": str(candidate.get("rationale_md") or "").strip(),
+            }
+        )
+    fairness_summary = parsed.get("fairness_summary") or {}
+    if isinstance(fairness_summary, dict):
+        result["fairness_summary"] = {
+            "policy": str(fairness_summary.get("policy") or "max_min_fairness").strip(),
+            "summary_md": str(fairness_summary.get("summary_md") or "").strip(),
+            "balance_note": str(fairness_summary.get("balance_note") or "").strip() or None,
+        }
     result["raw_text"] = _build_raw_text(result)
     result["internal_diagnostics"] = {
         "decision_confidence": parsed.get("decision_confidence"),
@@ -270,4 +379,3 @@ async def run_openai_decision_judge(
         "model": model,
     }
     return result
-

@@ -154,12 +154,60 @@ export interface RestaurantDocument {
 // Classic decision types removed. Only agent decision mode is supported.
 
 // Agent-based decision result
+export interface AgentDecisionCandidate {
+  rank: number
+  restaurantName: string
+  restaurantUrl?: string | null
+  recommendedDish?: string | null
+  rationaleMd: string
+}
+
+export interface AgentDecisionFairnessSummary {
+  policy: string
+  summaryMd: string
+  balanceNote?: string | null
+}
+
+export interface AgentDecisionTieBreakTurn {
+  speakerLabel: string
+  stance: string
+  utterance: string
+  roundIndex: number
+}
+
 export interface AgentDecisionResponse {
   recommendationRestaurantName: string
   recommendationRestaurantUrl?: string | null
   recommendedDish: string
   explanationMd: string
   rawText: string
+  topCandidates: AgentDecisionCandidate[]
+  fairnessSummary?: AgentDecisionFairnessSummary | null
+  tieBreakAvailable: boolean
+  tieBreakMode?: string | null
+  tieBreakTranscript: AgentDecisionTieBreakTurn[]
+}
+
+export interface ConfirmDecisionChoiceRequest {
+  teamId: string
+  restaurantName: string
+  restaurantUrl?: string | null
+  recommendedDish?: string | null
+  rationaleMd?: string | null
+  source?: string
+}
+
+export interface ConfirmDecisionChoiceResponse {
+  decisionRunId: string
+  restaurantName: string
+  message: string
+}
+
+export interface AgentDecisionRequest {
+  teamId: string
+  restaurantIds: string[]
+  decisionMode?: 'standard' | 'tie_break'
+  userQuestion?: string
 }
 
 export interface IngestRestaurantInput {

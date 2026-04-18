@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from sqlmodel import Session, select
 
-from ..db.models import Profile, Team, TeamDecisionContext, TeamMembership
+from ..db.models import DecisionRun, Profile, Team, TeamDecisionContext, TeamMembership
 from ..preferences.service import normalize_other_preferences
 
 
@@ -64,6 +64,77 @@ def _extract_member_soft_preferences(profile: Profile) -> dict[str, Any]:
     }
 
 
+def _build_fairness_memory(
+    session: Session,
+    *,
+    team_id: str,
+    members: list[dict[str, Any]],
+) -> dict[str, Any]:
+    recent_runs = session.exec(
+        select(DecisionRun)
+        .where(DecisionRun.team_id == team_id)
+        .order_by(DecisionRun.created_at.desc())
+        .limit(5)
+    ).all()
+
+    winner_counter: Counter[str] = Counter()
+    recent_recommendations: list[dict[str, Any]] = []
+    repeat_restaurant_count = 0
+    seen_restaurants: set[str] = set()
+
+    for run in recent_runs:
+        result = run.result or {}
+        winner_name = str(result.get("recommendation_restaurant_name") or "").strip()
+        winner_dish = str(result.get("recommended_dish") or "").strip()
+        if winner_name:
+            normalized = winner_name.lower()
+            winner_counter[normalized] += 1
+            if normalized in seen_restaurants:
+                repeat_restaurant_count += 1
+            seen_restaurants.add(normalized)
+
+        recent_recommendations.append(
+            {
+                "decision_run_id": run.id,
+                "restaurant_name": winner_name or None,
+                "recommended_dish": winner_dish or None,
+                "created_at": run.created_at.isoformat(),
+            }
+        )
+
+    profiled_members = [member for member in members if member.get("has_profile")]
+    compromise_risk_members: list[str] = []
+    for member in profiled_members:
+        soft_preferences = member.get("soft_preferences") or {}
+        dislikes = soft_preferences.get("dislikes") or []
+        if dislikes:
+            compromise_risk_members.append(member.get("member_ref"))
+
+    winner_concentration = 0.0
+    most_common_restaurant = None
+    if recent_runs and winner_counter:
+        most_common_restaurant, top_count = winner_counter.most_common(1)[0]
+        winner_concentration = round(top_count / max(1, len(recent_runs)), 2)
+
+    fairness_note = "No meaningful fairness memory yet."
+    if winner_concentration >= 0.6 and most_common_restaurant:
+        fairness_note = (
+            f"Recent decisions have concentrated on {most_common_restaurant}, so novelty and balance should be considered."
+        )
+    elif repeat_restaurant_count >= 2:
+        fairness_note = "Recent decisions repeated the same restaurant multiple times."
+    elif compromise_risk_members:
+        fairness_note = "Some members have explicit dislikes, so tie-breaks should avoid repeatedly sidelining them."
+
+    return {
+        "recent_recommendations": recent_recommendations,
+        "recent_restaurant_repeat_count": repeat_restaurant_count,
+        "winner_concentration": winner_concentration,
+        "compromise_risk_member_refs": compromise_risk_members[:3],
+        "fairness_note": fairness_note,
+    }
+
+
 def build_team_decision_context_payload(session: Session, team_id: str) -> dict[str, Any]:
     team = session.exec(select(Team).where(Team.id == team_id)).first()
     if not team:
@@ -98,6 +169,7 @@ def build_team_decision_context_payload(session: Session, team_id: str) -> dict[
             members.append(
                 {
                     "member_ref": membership.id,
+                    "display_name": f"Member {len(members) + 1}",
                     "has_profile": False,
                     "hard_constraints": {
                         "allergies": [],
@@ -140,6 +212,7 @@ def build_team_decision_context_payload(session: Session, team_id: str) -> dict[
         members.append(
             {
                 "member_ref": membership.id,
+                "display_name": profile.display_name or f"Member {len(members) + 1}",
                 "has_profile": True,
                 "hard_constraints": {
                     "allergies": allergies,
@@ -150,6 +223,11 @@ def build_team_decision_context_payload(session: Session, team_id: str) -> dict[
         )
 
     now = datetime.utcnow().isoformat()
+    fairness_memory = _build_fairness_memory(
+        session,
+        team_id=team_id,
+        members=members,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "team_id": team_id,
@@ -184,6 +262,7 @@ def build_team_decision_context_payload(session: Session, team_id: str) -> dict[
                 "dietary_restriction_frequencies": dict(dietary_frequencies),
             },
         },
+        "fairness_memory": fairness_memory,
         "generated_at": now,
     }
 
@@ -237,4 +316,3 @@ def rebuild_user_team_decision_contexts(session: Session, user_id: str) -> None:
     team_ids = {membership.team_id for membership in memberships}
     for team_id in team_ids:
         rebuild_team_decision_context(session, team_id)
-

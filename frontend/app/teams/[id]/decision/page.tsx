@@ -5,6 +5,9 @@ import { useAuth } from '../../../../lib/auth-context'
 import {
   TeamWithMembers,
   AgentDecisionResponse,
+  AgentDecisionRequest,
+  ConfirmDecisionChoiceRequest,
+  ConfirmDecisionChoiceResponse,
   IngestRestaurantInput,
   IngestRestaurantsResponse,
   ExistingRestaurantsResponse,
@@ -103,6 +106,10 @@ export default function TeamDecisionPage() {
   const [agentDeciding, setAgentDeciding] = useState(false)
   const [agentResult, setAgentResult] = useState<AgentDecisionResponse | null>(null)
   const [agentError, setAgentError] = useState<string | null>(null)
+  const [visibleTieBreakTurns, setVisibleTieBreakTurns] = useState(0)
+  const [tieBreakRunning, setTieBreakRunning] = useState(false)
+  const [tieBreakPrefetching, setTieBreakPrefetching] = useState(false)
+  const [tieBreakActivated, setTieBreakActivated] = useState(false)
   
   // Raw content viewing state
   const [viewingContent, setViewingContent] = useState<{[key: string]: RestaurantDocument | null}>({})
@@ -118,6 +125,9 @@ export default function TeamDecisionPage() {
   const [agentRunStage, setAgentRunStage] = useState<AgentRunStage>('idle')
   const [agentActivities, setAgentActivities] = useState<AgentActivity[]>([])
   const [agentAutoRunning, setAgentAutoRunning] = useState(false)
+  const [confirmingChoiceKey, setConfirmingChoiceKey] = useState<string | null>(null)
+  const [choiceConfirmation, setChoiceConfirmation] = useState<string | null>(null)
+  const decisionLocked = Boolean(choiceConfirmation)
 
   useEffect(() => {
     if (api && teamId) {
@@ -238,6 +248,10 @@ export default function TeamDecisionPage() {
     setAgentError(null)
     setAgentRunStage('idle')
     setAgentActivities([])
+    setVisibleTieBreakTurns(0)
+    setTieBreakPrefetching(false)
+    setTieBreakActivated(false)
+    setChoiceConfirmation(null)
     setRestaurants([{ url: '', name: '' }])
   }
 
@@ -317,20 +331,9 @@ export default function TeamDecisionPage() {
 
   const handleMakeAgentDecision = async (e: React.MouseEvent) => {
     e.preventDefault()
-    if (!api || !team) return
+    if (!api || !team || decisionLocked) return
 
-    // Get restaurant IDs from either processed results or existing restaurants
-    let restaurantIds: string[] = []
-    
-    if (processResult && processResult.restaurantIds && processResult.restaurantIds.length > 0) {
-      // Use newly processed restaurants
-      restaurantIds = processResult.restaurantIds
-    } else if (existingRestaurants && existingRestaurants.restaurants.length > 0) {
-      // Use existing restaurants that have content
-      restaurantIds = existingRestaurants.restaurants
-        .filter(r => r.hasContent)
-        .map(r => r.id)
-    }
+    const restaurantIds = getDecisionRestaurantIds()
 
     if (restaurantIds.length === 0) {
       setAgentError('No restaurant data available. Please process restaurant information first or ensure existing restaurants have content.')
@@ -344,14 +347,19 @@ export default function TeamDecisionPage() {
       setAgentRunStage('reasoning')
       addAgentActivity('Reading masked team needs')
       addAgentActivity('Evaluating available menus and fit signals')
+      setTieBreakPrefetching(false)
+      setTieBreakActivated(false)
+      setChoiceConfirmation(null)
 
       // Run agent with the restaurant IDs
       const result = await api.post<AgentDecisionResponse>('/decision/agent-decision', {
         teamId: teamId,
         restaurantIds: restaurantIds,
+        decisionMode: 'standard',
         userQuestion: currentPromptQuestion,
-      })
+      } satisfies AgentDecisionRequest)
       setAgentResult(result)
+      setVisibleTieBreakTurns(0)
       setAgentRunStage('done')
       addAgentActivity('Final recommendation ready')
     } catch (err) {
@@ -359,6 +367,52 @@ export default function TeamDecisionPage() {
       setAgentRunStage('error')
     } finally {
       setAgentDeciding(false)
+    }
+  }
+
+  const getDecisionRestaurantIds = () => {
+    if (processResult && processResult.restaurantIds && processResult.restaurantIds.length > 0) {
+      return processResult.restaurantIds
+    }
+    if (existingRestaurants && existingRestaurants.restaurants.length > 0) {
+      return existingRestaurants.restaurants
+        .filter(r => r.hasContent)
+        .map(r => r.id)
+    }
+    return []
+  }
+
+  const handleStartTieBreak = async () => {
+    if (!api || !team || tieBreakRunning || decisionLocked) return
+
+    if ((agentResult?.tieBreakTranscript?.length ?? 0) > 0) {
+      setTieBreakActivated(true)
+      setVisibleTieBreakTurns(0)
+      return
+    }
+
+    const restaurantIds = getDecisionRestaurantIds()
+    if (restaurantIds.length < 2) {
+      setAgentError('Need at least two viable restaurant candidates for Tie-Break.')
+      return
+    }
+
+    try {
+      setTieBreakRunning(true)
+      setAgentError(null)
+      setTieBreakActivated(true)
+      const result = await api.post<AgentDecisionResponse>('/decision/agent-decision', {
+        teamId,
+        restaurantIds,
+        decisionMode: 'tie_break',
+        userQuestion: 'Run an explicit Tie-Break between the strongest lunch options and resolve with a final choice.'
+      } satisfies AgentDecisionRequest)
+      setAgentResult(result)
+      setVisibleTieBreakTurns(0)
+    } catch (err) {
+      setAgentError(err instanceof Error ? err.message : 'Failed to run Tie-Break')
+    } finally {
+      setTieBreakRunning(false)
     }
   }
 
@@ -450,6 +504,118 @@ export default function TeamDecisionPage() {
     }
   }
 
+  const tieBreakSpeakerStyles = useMemo(() => {
+    const transcript = agentResult?.tieBreakTranscript ?? []
+    const palette = [
+      {
+        align: 'justify-start',
+        bubble: 'bg-rose-100 border-rose-200 text-rose-950',
+        badge: 'bg-rose-200 text-rose-900',
+        meta: 'text-rose-700',
+      },
+      {
+        align: 'justify-end',
+        bubble: 'bg-sky-100 border-sky-200 text-sky-950',
+        badge: 'bg-sky-200 text-sky-900',
+        meta: 'text-sky-700',
+      },
+      {
+        align: 'justify-start',
+        bubble: 'bg-amber-100 border-amber-200 text-amber-950',
+        badge: 'bg-amber-200 text-amber-900',
+        meta: 'text-amber-700',
+      },
+    ]
+    const mapping: Record<string, typeof palette[number]> = {}
+    let speakerIndex = 0
+    for (const turn of transcript) {
+      const key = turn.speakerLabel
+      if (!key || mapping[key]) continue
+      if (key.toLowerCase() === 'moderator') {
+        mapping[key] = {
+          align: 'justify-center',
+          bubble: 'bg-violet-100 border-violet-200 text-violet-950',
+          badge: 'bg-violet-200 text-violet-900',
+          meta: 'text-violet-700',
+        }
+        continue
+      }
+      mapping[key] = palette[speakerIndex % palette.length]
+      speakerIndex += 1
+    }
+    return mapping
+  }, [agentResult])
+
+  useEffect(() => {
+    const shouldPrefetch =
+      !!api &&
+      !decisionLocked &&
+      !agentDeciding &&
+      !tieBreakRunning &&
+      !tieBreakPrefetching &&
+      !!agentResult &&
+      (agentResult.topCandidates?.length ?? 0) >= 2 &&
+      (agentResult.tieBreakTranscript?.length ?? 0) === 0
+
+    if (!shouldPrefetch) {
+      return
+    }
+
+    let cancelled = false
+    const restaurantIds = getDecisionRestaurantIds()
+    if (restaurantIds.length < 2) {
+      return
+    }
+
+    const runPrefetch = async () => {
+      try {
+        setTieBreakPrefetching(true)
+        const result = await api.post<AgentDecisionResponse>('/decision/agent-decision', {
+          teamId,
+          restaurantIds,
+          decisionMode: 'tie_break',
+          userQuestion: 'Run an explicit Tie-Break between the strongest lunch options and resolve with a final choice.'
+        } satisfies AgentDecisionRequest)
+        if (!cancelled) {
+          setAgentResult(result)
+        }
+      } catch {
+        // Ignore prefetch failures; manual Tie-Break remains available.
+      } finally {
+        if (!cancelled) {
+          setTieBreakPrefetching(false)
+        }
+      }
+    }
+
+    void runPrefetch()
+
+    return () => {
+      cancelled = true
+    }
+  }, [api, decisionLocked, agentDeciding, tieBreakPrefetching, tieBreakRunning, agentResult, teamId])
+
+  useEffect(() => {
+    const transcript = tieBreakActivated ? (agentResult?.tieBreakTranscript ?? []) : []
+    if (!transcript.length) {
+      setVisibleTieBreakTurns(0)
+      return
+    }
+
+    setVisibleTieBreakTurns(1)
+    const timer = window.setInterval(() => {
+      setVisibleTieBreakTurns((current) => {
+        if (current >= transcript.length) {
+          window.clearInterval(timer)
+          return current
+        }
+        return current + 1
+      })
+    }, 1100)
+
+    return () => window.clearInterval(timer)
+  }, [agentResult, tieBreakActivated])
+
   const handleDiscoverRestaurants = async (e: React.MouseEvent) => {
     e.preventDefault()
     if (!api || !team) return
@@ -497,7 +663,7 @@ export default function TeamDecisionPage() {
   }, [mapRestaurants, selectedMapRestaurantId])
 
   const handleRunAgentSession = async () => {
-    if (!api || !team) return
+    if (!api || !team || decisionLocked) return
 
     setAgentError(null)
     setDiscoveryError(null)
@@ -569,6 +735,7 @@ export default function TeamDecisionPage() {
         userQuestion: currentPromptQuestion,
       })
       setAgentResult(decision)
+      setChoiceConfirmation(null)
       setAgentRunStage('done')
       addAgentActivity('Decision completed')
     } catch (err) {
@@ -578,6 +745,43 @@ export default function TeamDecisionPage() {
       addAgentActivity('Run failed', message)
     } finally {
       setAgentAutoRunning(false)
+    }
+  }
+
+  const handleConfirmChoice = async ({
+    key,
+    restaurantName,
+    restaurantUrl,
+    recommendedDish,
+    rationaleMd,
+    source,
+  }: {
+    key: string
+    restaurantName: string
+    restaurantUrl?: string | null
+    recommendedDish?: string | null
+    rationaleMd?: string | null
+    source: string
+  }) => {
+    if (!api) return
+
+    try {
+      setConfirmingChoiceKey(key)
+      setAgentError(null)
+      setChoiceConfirmation(null)
+      const result = await api.post<ConfirmDecisionChoiceResponse>('/decision/confirm-choice', {
+        teamId,
+        restaurantName,
+        restaurantUrl,
+        recommendedDish,
+        rationaleMd,
+        source,
+      } satisfies ConfirmDecisionChoiceRequest)
+      setChoiceConfirmation(result.message)
+    } catch (err) {
+      setAgentError(err instanceof Error ? err.message : 'Failed to lock in the team decision')
+    } finally {
+      setConfirmingChoiceKey(null)
     }
   }
 
@@ -678,7 +882,7 @@ export default function TeamDecisionPage() {
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)] xl:items-start">
       {/* Restaurant Management & Available Data */}
-      <Card className="border-green-200 bg-green-50">
+      <Card className="self-start border-green-200 bg-green-50">
         <CardHeader>
           <CardTitle className="text-green-900">Restaurant Data Setup</CardTitle>
           <CardDescription className="text-green-800">Refresh menu sources and keep recommendation context ready.</CardDescription>
@@ -1207,12 +1411,12 @@ export default function TeamDecisionPage() {
       </Card>
 
       {/* AI Decision */}
-      <Card className="border-purple-200 bg-purple-50 xl:sticky xl:top-6">
+      <Card className="self-start border-purple-200 bg-purple-50 xl:sticky xl:top-6 xl:max-h-[calc(100vh-3rem)] xl:flex xl:flex-col xl:overflow-hidden">
         <CardHeader>
           <CardTitle className="text-purple-900">Decision Recommendation</CardTitle>
           <CardDescription className="text-purple-800">Get a ranked recommendation based on masked team preferences and available restaurant data.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="space-y-4 xl:min-h-0 xl:overflow-y-auto">
           <p className="text-sm text-purple-700">
             Use the processed restaurant data to get an AI recommendation for today ({new Date().toLocaleDateString('en-US', { weekday: 'long' })})
           </p>
@@ -1270,17 +1474,23 @@ export default function TeamDecisionPage() {
             </div>
           )}
 
+          {choiceConfirmation && (
+            <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded">
+              {choiceConfirmation}
+            </div>
+          )}
+
           <div className="flex flex-wrap gap-2">
             <Button
               onClick={handleRunAgentSession}
-              disabled={isAgentBusy}
+              disabled={isAgentBusy || decisionLocked}
               className="rounded-2xl bg-purple-700 hover:bg-purple-800"
             >
               {agentAutoRunning ? 'Running Agent Session...' : 'Run Agent Session'}
             </Button>
             <Button
               onClick={handleMakeAgentDecision}
-              disabled={isAgentBusy || (
+              disabled={decisionLocked || isAgentBusy || (
                 (!processResult || processResult.restaurantIds.length === 0) &&
                 (!existingRestaurants || existingRestaurants.restaurants.filter(r => r.hasContent).length === 0)
               )}
@@ -1299,10 +1509,164 @@ export default function TeamDecisionPage() {
           {agentResult && !agentDeciding && (
             <Card className="mt-4 border-purple-200">
               <CardHeader>
-                <CardTitle className="text-purple-900">Agent Recommendation</CardTitle>
-                <CardDescription>AI-selected restaurant and dish</CardDescription>
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <CardTitle className="text-purple-900">Agent Recommendation</CardTitle>
+                    <CardDescription>AI-selected restaurant and dish</CardDescription>
+                  </div>
+                  {agentResult.topCandidates.length >= 2 && (
+                    <div className="flex flex-col items-start gap-2">
+                      <Button
+                        onClick={handleStartTieBreak}
+                        disabled={tieBreakRunning || decisionLocked}
+                        className="rounded-2xl bg-violet-600 hover:bg-violet-700"
+                      >
+                        {tieBreakRunning ? 'Running Tie-Break...' : 'Start Tie-Break'}
+                      </Button>
+                      <span className="text-xs text-violet-800">
+                        {tieBreakPrefetching
+                          ? 'Warming up the deliberation in the background...'
+                          : agentResult.tieBreakTranscript.length > 0
+                            ? 'Tie-Break is ready to play.'
+                            : 'Starts a short deliberation round between the strongest finalists.'}
+                      </span>
+                    </div>
+                  )}
+                </div>
               </CardHeader>
               <CardContent className="space-y-3">
+                {tieBreakActivated && (agentResult.tieBreakAvailable || agentResult.tieBreakMode === 'explicit') && agentResult.tieBreakTranscript.length > 0 && (
+                  <div className="rounded-lg border border-violet-200 bg-violet-50 p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium text-violet-900">Tie-Break Theater</div>
+                        <div className="text-xs text-violet-700">
+                          Simulated team deliberation based on current context and fairness memory.
+                        </div>
+                      </div>
+                      {visibleTieBreakTurns < agentResult.tieBreakTranscript.length && (
+                        <div className="flex items-center gap-1 rounded-full bg-white px-3 py-1 text-xs text-violet-700 shadow-sm">
+                          <span className="h-1.5 w-1.5 rounded-full bg-violet-500 animate-bounce [animation-delay:-0.2s]" />
+                          <span className="h-1.5 w-1.5 rounded-full bg-violet-500 animate-bounce [animation-delay:-0.1s]" />
+                          <span className="h-1.5 w-1.5 rounded-full bg-violet-500 animate-bounce" />
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-3">
+                      {agentResult.tieBreakTranscript.slice(0, visibleTieBreakTurns).map((turn, index) => {
+                        const style = tieBreakSpeakerStyles[turn.speakerLabel] || tieBreakSpeakerStyles['Moderator'] || {
+                          align: 'justify-start',
+                          bubble: 'bg-white border-violet-100 text-slate-900',
+                          badge: 'bg-violet-200 text-violet-900',
+                          meta: 'text-violet-700',
+                        }
+                        const isModerator = turn.speakerLabel.toLowerCase() === 'moderator'
+                        return (
+                          <div key={`${turn.speakerLabel}-${turn.roundIndex}-${index}`} className={`flex ${style.align}`}>
+                            <div className={`max-w-[85%] rounded-2xl border p-3 shadow-sm ${style.bubble}`}>
+                              <div className="flex items-center justify-between gap-3">
+                                <div className={`rounded-full px-2.5 py-1 text-xs font-semibold ${style.badge}`}>
+                                  {turn.speakerLabel}
+                                </div>
+                                <div className={`text-[11px] uppercase tracking-wide ${style.meta}`}>
+                                  {isModerator ? 'final call' : `round ${turn.roundIndex}`}
+                                </div>
+                              </div>
+                              <p className="text-sm mt-2 leading-relaxed">{turn.utterance}</p>
+                            </div>
+                          </div>
+                        )
+                      })}
+                      {visibleTieBreakTurns < agentResult.tieBreakTranscript.length && (
+                        <div className="flex justify-start">
+                          <div className="rounded-2xl border border-violet-100 bg-white px-4 py-3 shadow-sm">
+                            <div className="flex items-center gap-1">
+                              <span className="h-2 w-2 rounded-full bg-violet-400 animate-bounce [animation-delay:-0.2s]" />
+                              <span className="h-2 w-2 rounded-full bg-violet-400 animate-bounce [animation-delay:-0.1s]" />
+                              <span className="h-2 w-2 rounded-full bg-violet-400 animate-bounce" />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {agentResult.topCandidates.length > 0 && (
+                  <div className="space-y-3">
+                    <div className="text-sm font-medium text-slate-700">Top 3 Candidates</div>
+                    <div className="grid gap-3">
+                      {agentResult.topCandidates.map((candidate) => (
+                        <div key={`${candidate.rank}-${candidate.restaurantName}`} className="rounded-lg border border-purple-100 bg-purple-50/60 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="font-medium text-purple-900">
+                                {candidate.rank}. {candidate.restaurantUrl ? (
+                                  <a
+                                    href={candidate.restaurantUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-purple-900 hover:text-purple-700 underline"
+                                  >
+                                    {candidate.restaurantName}
+                                  </a>
+                                ) : (
+                                  candidate.restaurantName
+                                )}
+                              </div>
+                              {candidate.recommendedDish && (
+                                <div className="text-sm text-slate-700 mt-1">
+                                  Dish: {candidate.recommendedDish}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                          <div className="text-sm text-slate-700 mt-2">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {candidate.rationaleMd}
+                            </ReactMarkdown>
+                          </div>
+                          <div className="mt-3">
+                            <Button
+                              className="rounded-2xl w-full md:w-auto"
+                              disabled={decisionLocked || confirmingChoiceKey === `candidate-${candidate.rank}`}
+                              onClick={() =>
+                                handleConfirmChoice({
+                                  key: `candidate-${candidate.rank}`,
+                                  restaurantName: candidate.restaurantName,
+                                  restaurantUrl: candidate.restaurantUrl,
+                                  recommendedDish: candidate.recommendedDish,
+                                  rationaleMd: candidate.rationaleMd,
+                                  source: 'top_candidate_choice',
+                                })
+                              }
+                            >
+                              {confirmingChoiceKey === `candidate-${candidate.rank}` ? 'Locking it in...' : "Let's Go!"}
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {agentResult.fairnessSummary && (
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-1">
+                    <div className="text-sm font-medium text-emerald-900">Fairness Memory</div>
+                    <div className="text-sm text-emerald-800">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {agentResult.fairnessSummary.summaryMd}
+                      </ReactMarkdown>
+                    </div>
+                    {agentResult.fairnessSummary.balanceNote && (
+                      <div className="text-xs text-emerald-700">
+                        {agentResult.fairnessSummary.balanceNote}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div>
                   <span className="font-medium">Restaurant:</span>{' '}
                   {agentResult.recommendationRestaurantUrl ? (
@@ -1338,15 +1702,22 @@ export default function TeamDecisionPage() {
                   <pre className="whitespace-pre-wrap break-words text-sm text-slate-700">{agentResult.rawText}</pre>
                 </details>
                 <div className="pt-2">
-                  {agentResult.recommendationRestaurantUrl ? (
-                    <a href={agentResult.recommendationRestaurantUrl} target="_blank" rel="noreferrer">
-                      <Button className="rounded-2xl w-full md:w-auto">Let's Go!</Button>
-                    </a>
-                  ) : (
-                    <Button className="rounded-2xl w-full md:w-auto" asChild>
-                      <Link href={`/teams/${teamId}`}>Let's Go!</Link>
-                    </Button>
-                  )}
+                  <Button
+                    className="rounded-2xl w-full md:w-auto"
+                    disabled={decisionLocked || confirmingChoiceKey === 'final-recommendation'}
+                    onClick={() =>
+                      handleConfirmChoice({
+                        key: 'final-recommendation',
+                        restaurantName: agentResult.recommendationRestaurantName,
+                        restaurantUrl: agentResult.recommendationRestaurantUrl,
+                        recommendedDish: agentResult.recommendedDish,
+                        rationaleMd: agentResult.explanationMd,
+                        source: agentResult.tieBreakMode === 'explicit' ? 'tie_break_winner' : 'agent_recommendation',
+                      })
+                    }
+                  >
+                    {confirmingChoiceKey === 'final-recommendation' ? 'Locking it in...' : "Let's Go!"}
+                  </Button>
                 </div>
               </CardContent>
             </Card>
