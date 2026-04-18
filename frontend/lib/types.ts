@@ -162,6 +162,11 @@ export interface AgentDecisionResponse {
   rawText: string
 }
 
+export interface IngestRestaurantInput {
+  url: string
+  name?: string
+}
+
 export interface ProcessingDetail {
   url: string
   action: 'scraped' | 'cached' | 'failed'

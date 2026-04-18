@@ -17,9 +17,15 @@ class AgentDecisionResponse(CamelModel):
     raw_text: str
 
 
+class IngestRestaurantInput(CamelModel):
+    url: str
+    name: Optional[str] = None
+
+
 class IngestRestaurantsRequest(CamelModel):
     team_id: str
-    restaurant_urls: List[str]
+    restaurant_urls: Optional[List[str]] = None
+    restaurants: Optional[List[IngestRestaurantInput]] = None
     force_rescrape: Optional[bool] = False
 
 

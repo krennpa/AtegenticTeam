@@ -4,7 +4,7 @@ import math
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from ..db.models import Team, TeamMembership, Profile, TeamPreference, Restaurant, RestaurantDocument
+from ..db.models import Team, TeamMembership, TeamRestaurant, Profile, TeamPreference, Restaurant, RestaurantDocument
 
 # Pydantic models for tool inputs
 class RetrieveNeedsInput(BaseModel):
@@ -144,6 +144,20 @@ class RetrieveMenuMarkdownsTool(BaseDBTool):
                 menus.append({"restaurant_id": rid, "error": "Restaurant not found."})
                 continue
 
+            team_restaurant = None
+            if self.team_id:
+                team_restaurant = self.db.exec(
+                    select(TeamRestaurant).where(
+                        TeamRestaurant.team_id == self.team_id,
+                        TeamRestaurant.restaurant_id == rid,
+                    )
+                ).first()
+            effective_restaurant_name = (
+                team_restaurant.display_name
+                if team_restaurant and team_restaurant.display_name
+                else restaurant.display_name or restaurant.url
+            )
+
             restaurant_google_maps = (restaurant.meta or {}).get("google_maps") or {}
             restaurant_lat = _coerce_float(restaurant_google_maps.get("lat"))
             restaurant_lng = _coerce_float(restaurant_google_maps.get("lng"))
@@ -180,7 +194,7 @@ class RetrieveMenuMarkdownsTool(BaseDBTool):
                 
                 menus.append({
                     "restaurant_id": rid,
-                    "restaurant_name": restaurant.display_name or restaurant.url,
+                    "restaurant_name": effective_restaurant_name,
                     "restaurant_url": restaurant.url,
                     "team_location": team_location,
                     "restaurant_location": {
@@ -202,7 +216,7 @@ class RetrieveMenuMarkdownsTool(BaseDBTool):
             else:
                 menus.append({
                     "restaurant_id": rid,
-                    "restaurant_name": restaurant.display_name or restaurant.url,
+                    "restaurant_name": effective_restaurant_name,
                     "restaurant_url": restaurant.url,
                     "team_location": team_location,
                     "restaurant_location": {
