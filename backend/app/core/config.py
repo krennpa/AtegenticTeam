@@ -39,6 +39,10 @@ class Settings(BaseSettings):
         default=None,
         description="OpenAI model for team decision judging",
     )
+    OPENAI_TIE_BREAK_MODEL: str | None = Field(
+        default=None,
+        description="OpenAI model for tie-break deliberation judging",
+    )
     OPENAI_DECISION_TEMPERATURE: float = Field(
         default=0.1,
         description="Sampling temperature for team decision judging",

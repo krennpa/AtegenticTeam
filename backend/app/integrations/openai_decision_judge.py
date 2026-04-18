@@ -227,7 +227,14 @@ async def run_openai_decision_judge(
     decision_mode: str = "standard",
 ) -> dict[str, Any]:
     api_key = _require_api_key()
-    model = settings.OPENAI_DECISION_MODEL or settings.OPENAI_MODEL
+    if decision_mode == "tie_break":
+        model = (
+            settings.OPENAI_TIE_BREAK_MODEL
+            or settings.OPENAI_DECISION_MODEL
+            or settings.OPENAI_MODEL
+        )
+    else:
+        model = settings.OPENAI_DECISION_MODEL or settings.OPENAI_MODEL
     restaurant_payload = _build_restaurant_payload(menus)
 
     if not restaurant_payload:
