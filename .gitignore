@@ -6,3 +6,10 @@ venv-linux
 # node_modules folder in frontend folder
 **/node_modules/
 **/secrets/
+
+# Python cache artifacts
+**/__pycache__/
+*.py[cod]
+
+# Next.js build output
+**/.next/

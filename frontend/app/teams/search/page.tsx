@@ -95,6 +95,9 @@ export default function TeamSearchPage() {
                   {team.description && (
                     <p className="text-slate-600 mb-3">{team.description}</p>
                   )}
+                  {team.location && (
+                    <p className="text-sm text-slate-500 mb-3">Location: {team.location}</p>
+                  )}
                   <div className="flex items-center gap-4 text-sm text-slate-500">
                     <span>{team.memberCount} member{team.memberCount !== 1 ? 's' : ''}</span>
                     {team.maxMembers && (

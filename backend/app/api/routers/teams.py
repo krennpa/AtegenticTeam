@@ -5,6 +5,12 @@ from typing import List
 
 from ...api.deps import get_current_user, get_db_session
 from ...db.models import Team, TeamMembership, User, Profile, TeamPreference
+from ...integrations.google_places import (
+    GooglePlacesAPIError,
+    GooglePlacesConfigError,
+    extract_google_maps_fields,
+    resolve_place_by_text,
+)
 from ...schemas import (
     TeamCreate, TeamRead, TeamUpdate, TeamWithMembersRead, 
     TeamMemberRead, JoinTeamRequest, UserRead, TeamPreferenceRead
@@ -30,6 +36,43 @@ def _require_active_membership(session: Session, team_id: str, user_id: str) -> 
             detail="You are not an active member of this team",
         )
     return membership
+
+
+async def _resolve_team_location(location: str | None) -> dict:
+    normalized_location = (location or "").strip()
+    if not normalized_location:
+        return {
+            "location": None,
+            "location_place_id": None,
+            "location_lat": None,
+            "location_lng": None,
+        }
+
+    try:
+        result = await resolve_place_by_text(normalized_location)
+    except (GooglePlacesConfigError, GooglePlacesAPIError):
+        return {
+            "location": normalized_location,
+            "location_place_id": None,
+            "location_lat": None,
+            "location_lng": None,
+        }
+
+    google_maps = extract_google_maps_fields(result or {})
+    if not google_maps:
+        return {
+            "location": normalized_location,
+            "location_place_id": None,
+            "location_lat": None,
+            "location_lng": None,
+        }
+
+    return {
+        "location": google_maps.get("formatted_address") or google_maps.get("display_name") or normalized_location,
+        "location_place_id": google_maps.get("place_id"),
+        "location_lat": google_maps.get("lat"),
+        "location_lng": google_maps.get("lng"),
+    }
 
 
 @router.get("/{team_id}/preferences", response_model=TeamPreferenceRead)
@@ -90,15 +133,20 @@ def rebuild_team_preferences(
 
 
 @router.post("/", response_model=TeamRead)
-def create_team(
+async def create_team(
     payload: TeamCreate,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_db_session),
 ):
     """Create a new team"""
+    location_fields = await _resolve_team_location(payload.location)
     team = Team(
         name=payload.name,
         description=payload.description,
+        location=location_fields["location"],
+        location_place_id=location_fields["location_place_id"],
+        location_lat=location_fields["location_lat"],
+        location_lng=location_fields["location_lng"],
         creator_user_id=current_user.id,
         max_members=payload.max_members,
     )
@@ -119,6 +167,10 @@ def create_team(
         id=team.id,
         name=team.name,
         description=team.description,
+        location=team.location,
+        location_place_id=team.location_place_id,
+        location_lat=team.location_lat,
+        location_lng=team.location_lng,
         creator_user_id=team.creator_user_id,
         is_active=team.is_active,
         max_members=team.max_members,
@@ -159,6 +211,10 @@ def list_my_teams(
                 id=team.id,
                 name=team.name,
                 description=team.description,
+                location=team.location,
+                location_place_id=team.location_place_id,
+                location_lat=team.location_lat,
+                location_lng=team.location_lng,
                 creator_user_id=team.creator_user_id,
                 is_active=team.is_active,
                 max_members=team.max_members,
@@ -230,6 +286,10 @@ def get_team_details(
         id=team.id,
         name=team.name,
         description=team.description,
+        location=team.location,
+        location_place_id=team.location_place_id,
+        location_lat=team.location_lat,
+        location_lng=team.location_lng,
         creator_user_id=team.creator_user_id,
         is_active=team.is_active,
         max_members=team.max_members,
@@ -312,6 +372,10 @@ def join_team(
         id=team.id,
         name=team.name,
         description=team.description,
+        location=team.location,
+        location_place_id=team.location_place_id,
+        location_lat=team.location_lat,
+        location_lng=team.location_lng,
         creator_user_id=team.creator_user_id,
         is_active=team.is_active,
         max_members=team.max_members,
@@ -352,7 +416,7 @@ def leave_team(
 
 
 @router.put("/{team_id}", response_model=TeamRead)
-def update_team(
+async def update_team(
     team_id: str,
     payload: TeamUpdate,
     current_user: User = Depends(get_current_user),
@@ -377,6 +441,12 @@ def update_team(
         team.name = payload.name
     if payload.description is not None:
         team.description = payload.description
+    if payload.location is not None:
+        location_fields = await _resolve_team_location(payload.location)
+        team.location = location_fields["location"]
+        team.location_place_id = location_fields["location_place_id"]
+        team.location_lat = location_fields["location_lat"]
+        team.location_lng = location_fields["location_lng"]
     if payload.max_members is not None:
         team.max_members = payload.max_members
     if payload.is_active is not None:
@@ -401,6 +471,10 @@ def update_team(
         id=team.id,
         name=team.name,
         description=team.description,
+        location=team.location,
+        location_place_id=team.location_place_id,
+        location_lat=team.location_lat,
+        location_lng=team.location_lng,
         creator_user_id=team.creator_user_id,
         is_active=team.is_active,
         max_members=team.max_members,
@@ -439,6 +513,10 @@ def search_teams_by_name(
             id=team.id,
             name=team.name,
             description=team.description,
+            location=team.location,
+            location_place_id=team.location_place_id,
+            location_lat=team.location_lat,
+            location_lng=team.location_lng,
             creator_user_id=team.creator_user_id,
             is_active=team.is_active,
             max_members=team.max_members,
@@ -599,6 +677,10 @@ def invite_user_to_team(
         id=team.id,
         name=team.name,
         description=team.description,
+        location=team.location,
+        location_place_id=team.location_place_id,
+        location_lat=team.location_lat,
+        location_lng=team.location_lng,
         creator_user_id=team.creator_user_id,
         is_active=team.is_active,
         max_members=team.max_members,

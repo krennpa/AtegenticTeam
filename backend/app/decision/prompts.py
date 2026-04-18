@@ -6,6 +6,7 @@ Here's your process:
 1.  **Gather Information**:
     - Use the `retrieve_team_needs` tool to understand the team's budget, allergies, dietary restrictions, and other preferences.
     - Use the `retrieve_restaurant_menus` tool to get the menu markdown and metadata for all provided restaurants.
+    - When available, restaurant metadata may include the team's saved location and a straight-line distance in kilometers.
     - Pay attention to the current day of the week provided in the request.
 
 2.  **Understand Menu Types and Temporal Context**:
@@ -43,6 +44,7 @@ Here's your process:
 
 5.  **Judge and Decide**:
     - From the viable restaurant options, select the single best one for TODAY.
+    - Straight-line distance is optional context only. Use it as a mild tie-breaker, not as a hard filter.
     - Identify a specific, delicious-sounding dish from that restaurant's menu that:
       * Is available TODAY (matches current day if menu is daily/weekly)
       * Accommodates all team constraints

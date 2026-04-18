@@ -19,6 +19,7 @@ export default function TeamsPage() {
   const [createForm, setCreateForm] = useState({
     name: '',
     description: '',
+    location: '',
     maxMembers: ''
   })
 
@@ -48,11 +49,12 @@ export default function TeamsPage() {
       const payload = {
         name: createForm.name,
         description: createForm.description || undefined,
+        location: createForm.location || undefined,
         maxMembers: createForm.maxMembers ? parseInt(createForm.maxMembers) : undefined
       }
       
       await api.post<Team>('/teams/', payload)
-      setCreateForm({ name: '', description: '', maxMembers: '' })
+      setCreateForm({ name: '', description: '', location: '', maxMembers: '' })
       setShowCreateForm(false)
       loadTeams()
     } catch (err) {
@@ -123,6 +125,18 @@ export default function TeamsPage() {
             </div>
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">
+                Team Location (optional)
+              </label>
+              <input
+                type="text"
+                value={createForm.location}
+                onChange={(e) => setCreateForm(prev => ({ ...prev, location: e.target.value }))}
+                placeholder="Office, neighborhood, or meetup point"
+                className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
                 Max Members (optional)
               </label>
               <input
@@ -173,6 +187,9 @@ export default function TeamsPage() {
                   </h3>
                   {team.description && (
                     <p className="text-slate-600 mb-3">{team.description}</p>
+                  )}
+                  {team.location && (
+                    <p className="text-sm text-slate-500 mb-3">Location: {team.location}</p>
                   )}
                   <div className="flex items-center gap-4 text-sm text-slate-500">
                     <span>{team.memberCount} member{team.memberCount !== 1 ? 's' : ''}</span>

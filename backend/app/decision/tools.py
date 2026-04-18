@@ -1,10 +1,10 @@
 from typing import List, Dict, Any, Type
 from datetime import datetime
+import math
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from ..db.models import Team, TeamMembership, Profile, TeamPreference, Restaurant, RestaurantDocument
-from ..api.deps import get_db_session
 
 # Pydantic models for tool inputs
 class RetrieveNeedsInput(BaseModel):
@@ -17,6 +17,35 @@ class RetrieveMenuMarkdownsInput(BaseModel):
 class BaseDBTool:
     def __init__(self, db_session: Session):
         self.db = db_session
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _straight_line_distance_km(
+    origin_lat: float,
+    origin_lng: float,
+    destination_lat: float,
+    destination_lng: float,
+) -> float:
+    radius_km = 6371.0
+    lat1 = math.radians(origin_lat)
+    lng1 = math.radians(origin_lng)
+    lat2 = math.radians(destination_lat)
+    lng2 = math.radians(destination_lng)
+    dlat = lat2 - lat1
+    dlng = lng2 - lng1
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return radius_km * c
 
 # Tool Implementations
 class RetrieveNeedsTool(BaseDBTool):
@@ -90,19 +119,42 @@ class RetrieveNeedsTool(BaseDBTool):
 class RetrieveMenuMarkdownsTool(BaseDBTool):
     """Tool to retrieve the markdown content of menus for a list of restaurants."""
     name = "retrieve_restaurant_menus"
-    description = "Use this tool to get the menu markdown and metadata for one or more restaurants. Returns menu content, menu type (daily/weekly/static/mixed), detected days mentioned in menu, scraped timestamp, content age in hours, and freshness status."
+    description = "Use this tool to get the menu markdown and metadata for one or more restaurants. Returns menu content, menu type (daily/weekly/static/mixed), detected days mentioned in menu, scraped timestamp, content age in hours, freshness status, Google Maps restaurant metadata, and straight-line distance from the team's saved location when available."
     args_schema: Type[BaseModel] = RetrieveMenuMarkdownsInput
+
+    def __init__(self, db_session: Session, team_id: str | None = None):
+        super().__init__(db_session)
+        self.team_id = team_id
 
     def _run(self, restaurant_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
         """Use the tool."""
         menus = []
         now = datetime.now()
+        team = self.db.get(Team, self.team_id) if self.team_id else None
+        team_location = {
+            "location": team.location if team else None,
+            "place_id": team.location_place_id if team else None,
+            "lat": team.location_lat if team else None,
+            "lng": team.location_lng if team else None,
+        }
         
         for rid in restaurant_ids:
             restaurant = self.db.get(Restaurant, rid)
             if not restaurant:
                 menus.append({"restaurant_id": rid, "error": "Restaurant not found."})
                 continue
+
+            restaurant_google_maps = (restaurant.meta or {}).get("google_maps") or {}
+            restaurant_lat = _coerce_float(restaurant_google_maps.get("lat"))
+            restaurant_lng = _coerce_float(restaurant_google_maps.get("lng"))
+            team_lat = _coerce_float(team_location.get("lat"))
+            team_lng = _coerce_float(team_location.get("lng"))
+            distance_km = None
+            if None not in (team_lat, team_lng, restaurant_lat, restaurant_lng):
+                distance_km = round(
+                    _straight_line_distance_km(team_lat, team_lng, restaurant_lat, restaurant_lng),
+                    2,
+                )
 
             # Get the latest document for this restaurant
             doc = self.db.exec(
@@ -130,6 +182,16 @@ class RetrieveMenuMarkdownsTool(BaseDBTool):
                     "restaurant_id": rid,
                     "restaurant_name": restaurant.display_name or restaurant.url,
                     "restaurant_url": restaurant.url,
+                    "team_location": team_location,
+                    "restaurant_location": {
+                        "place_id": restaurant_google_maps.get("place_id"),
+                        "formatted_address": restaurant_google_maps.get("formatted_address"),
+                        "lat": restaurant_lat,
+                        "lng": restaurant_lng,
+                        "rating": restaurant_google_maps.get("rating"),
+                        "user_rating_count": restaurant_google_maps.get("user_rating_count"),
+                    },
+                    "straight_line_distance_km": distance_km,
                     "menu_markdown": doc.content_md,
                     "menu_type": menu_type,
                     "detected_days": detected_days,
@@ -142,12 +204,22 @@ class RetrieveMenuMarkdownsTool(BaseDBTool):
                     "restaurant_id": rid,
                     "restaurant_name": restaurant.display_name or restaurant.url,
                     "restaurant_url": restaurant.url,
+                    "team_location": team_location,
+                    "restaurant_location": {
+                        "place_id": restaurant_google_maps.get("place_id"),
+                        "formatted_address": restaurant_google_maps.get("formatted_address"),
+                        "lat": restaurant_lat,
+                        "lng": restaurant_lng,
+                        "rating": restaurant_google_maps.get("rating"),
+                        "user_rating_count": restaurant_google_maps.get("user_rating_count"),
+                    },
+                    "straight_line_distance_km": distance_km,
                     "menu_markdown": "",
                     "warning": "No menu content found for this restaurant."
                 })
         
         return {"menus": menus}
 
-def get_tools(db_session: Session):
+def get_tools(db_session: Session, team_id: str | None = None):
     """Factory function to get all tools with a db session."""
-    return [RetrieveNeedsTool(db_session), RetrieveMenuMarkdownsTool(db_session)]
+    return [RetrieveNeedsTool(db_session), RetrieveMenuMarkdownsTool(db_session, team_id=team_id)]

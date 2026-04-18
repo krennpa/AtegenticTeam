@@ -101,6 +101,10 @@ export interface Team {
   id: string
   name: string
   description?: string
+  location?: string
+  locationPlaceId?: string
+  locationLat?: number
+  locationLng?: number
   creatorUserId: string
   isActive: boolean
   maxMembers?: number
@@ -119,6 +123,10 @@ export interface TeamWithMembers {
   id: string
   name: string
   description?: string
+  location?: string
+  locationPlaceId?: string
+  locationLat?: number
+  locationLng?: number
   creatorUserId: string
   isActive: boolean
   maxMembers?: number
@@ -174,6 +182,8 @@ export interface ExistingRestaurant {
   id: string
   url: string
   displayName?: string
+  formattedAddress?: string
+  straightLineDistanceKm?: number
   lastScrapedAt?: string
   menuType?: string
   contentAgeDays?: number

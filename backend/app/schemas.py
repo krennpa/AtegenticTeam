@@ -169,6 +169,7 @@ class RestaurantDocumentRead(CamelModel):
 class TeamCreate(CamelModel):
     name: str
     description: Optional[str] = None
+    location: Optional[str] = None
     max_members: Optional[int] = None
 
 
@@ -176,6 +177,10 @@ class TeamRead(CamelModel):
     id: str
     name: str
     description: Optional[str] = None
+    location: Optional[str] = None
+    location_place_id: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
     creator_user_id: str
     is_active: bool
     max_members: Optional[int] = None
@@ -186,6 +191,7 @@ class TeamRead(CamelModel):
 class TeamUpdate(CamelModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    location: Optional[str] = None
     max_members: Optional[int] = None
     is_active: Optional[bool] = None
 
@@ -201,6 +207,10 @@ class TeamWithMembersRead(CamelModel):
     id: str
     name: str
     description: Optional[str] = None
+    location: Optional[str] = None
+    location_place_id: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
     creator_user_id: str
     is_active: bool
     max_members: Optional[int] = None

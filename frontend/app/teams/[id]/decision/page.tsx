@@ -444,7 +444,7 @@ export default function TeamDecisionPage() {
                     <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-green-200">
                       <div className="flex-1">
                         <div className="font-medium text-green-900">
-                          {(() => {
+                          {restaurant.displayName || (() => {
                             try {
                               return new URL(restaurant.url).hostname
                             } catch {
@@ -475,6 +475,18 @@ export default function TeamDecisionPage() {
                             <span className="ml-2 text-red-600">⚠ No content</span>
                           )}
                         </div>
+                        {(restaurant.formattedAddress || restaurant.straightLineDistanceKm !== undefined) && (
+                          <div className="text-sm text-slate-600 mt-1">
+                            {restaurant.formattedAddress && (
+                              <span>{restaurant.formattedAddress}</span>
+                            )}
+                            {restaurant.straightLineDistanceKm !== undefined && (
+                              <span className={restaurant.formattedAddress ? 'ml-2' : ''}>
+                                {restaurant.straightLineDistanceKm.toFixed(2)} km from team
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
                       <div className="flex gap-2 ml-3">
                         <Button

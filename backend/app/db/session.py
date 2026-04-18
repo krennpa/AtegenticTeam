@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Generator
+import sqlite3
 
 from sqlmodel import SQLModel, Session, create_engine
 
@@ -31,7 +32,37 @@ def get_session() -> Generator[Session, None, None]:
         yield session
 
 
+def _apply_sqlite_schema_updates(database_url: str) -> None:
+    if not database_url.startswith("sqlite:///"):
+        return
+
+    sqlite_path = database_url.replace("sqlite:///", "", 1)
+    if sqlite_path == ":memory:":
+        return
+
+    db_file = Path(sqlite_path)
+    if not db_file.is_absolute():
+        db_file = Path.cwd() / db_file
+    if not db_file.exists():
+        return
+
+    with sqlite3.connect(db_file) as conn:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(teams)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "location" not in columns:
+            cursor.execute("ALTER TABLE teams ADD COLUMN location VARCHAR")
+        if "location_place_id" not in columns:
+            cursor.execute("ALTER TABLE teams ADD COLUMN location_place_id VARCHAR")
+        if "location_lat" not in columns:
+            cursor.execute("ALTER TABLE teams ADD COLUMN location_lat REAL")
+        if "location_lng" not in columns:
+            cursor.execute("ALTER TABLE teams ADD COLUMN location_lng REAL")
+        conn.commit()
+
+
 def create_db_and_tables() -> None:
     from . import models  # ensure models are imported for metadata
 
     SQLModel.metadata.create_all(engine)
+    _apply_sqlite_schema_updates(settings.DATABASE_URL)
