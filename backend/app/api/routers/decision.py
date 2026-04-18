@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import List, Dict, Any
 from datetime import datetime
 from urllib.parse import urlparse
@@ -18,24 +19,34 @@ import logging
 from ...decision.agent import run_decision_agent
 from ...decision.menu_analyzer import extract_menu_metadata
 from ...core.config import settings
+from ...preferences.service import aggregate_team_preferences
 from ...decision.schemas import (
     AgentDecisionRequest,
     AgentDecisionResponse,
+    DiscoverRestaurantsRequest,
+    DiscoverRestaurantsResponse,
     IngestRestaurantInput,
     IngestRestaurantsRequest,
     IngestRestaurantsResponse,
+    DiscoveredRestaurant,
     ExistingRestaurantsResponse,
     ExistingRestaurant,
 )
 from ...integrations.google_places import (
     GooglePlacesAPIError,
     GooglePlacesConfigError,
+    search_nearby_places,
     search_places_by_text,
 )
 from ...integrations.openai_menu_extractor import (
     OpenAIMenuExtractorConfigError,
     OpenAIMenuExtractorError,
     extract_menu_with_openai,
+)
+from ...integrations.openai_restaurant_research import (
+    OpenAIRestaurantResearchConfigError,
+    OpenAIRestaurantResearchError,
+    research_restaurant_with_openai,
 )
 from ...schemas import DecisionRunRead
 
@@ -71,6 +82,335 @@ def _straight_line_distance_km(
     )
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return radius_km * c
+
+
+def _normalize_keyword(value: str) -> str:
+    return (value or "").strip().lower().replace("-", " ").replace("_", " ")
+
+
+def _price_level_to_numeric(price_level: Any) -> int | None:
+    if price_level is None:
+        return None
+    normalized = str(price_level).strip().lower()
+    mapping = {
+        "free": 0,
+        "price_level_free": 0,
+        "inexpensive": 1,
+        "price_level_inexpensive": 1,
+        "moderate": 2,
+        "price_level_moderate": 2,
+        "expensive": 3,
+        "price_level_expensive": 3,
+        "very_expensive": 4,
+        "price_level_very_expensive": 4,
+    }
+    return mapping.get(normalized)
+
+
+def _budget_target(budget_value: Any) -> int:
+    normalized = str(budget_value or "medium").strip().lower()
+    if normalized == "low":
+        return 1
+    if normalized == "high":
+        return 3
+    return 2
+
+
+def _extract_team_preference_keywords(other_preferences: dict[str, Any] | None) -> tuple[list[str], list[str]]:
+    data = other_preferences or {}
+    positive: list[str] = []
+    negative: list[str] = []
+
+    signals = data.get("signals")
+    if isinstance(signals, dict):
+        for payload in signals.values():
+            if isinstance(payload, dict) and payload.get("value"):
+                positive.append(str(payload["value"]))
+
+    for mood in data.get("recent_moods", []) or []:
+        if isinstance(mood, str):
+            positive.append(mood)
+
+    for dislike in data.get("dislikes", []) or []:
+        if isinstance(dislike, str):
+            negative.append(dislike)
+
+    seen_positive: set[str] = set()
+    seen_negative: set[str] = set()
+    cleaned_positive: list[str] = []
+    cleaned_negative: list[str] = []
+
+    for raw in positive:
+        normalized = _normalize_keyword(raw)
+        if normalized and normalized not in seen_positive:
+            seen_positive.add(normalized)
+            cleaned_positive.append(normalized)
+
+    for raw in negative:
+        normalized = _normalize_keyword(raw)
+        if normalized and normalized not in seen_negative:
+            seen_negative.add(normalized)
+            cleaned_negative.append(normalized)
+
+    return cleaned_positive, cleaned_negative
+
+
+def _derive_cuisine_tags_from_google(google_maps: dict[str, Any]) -> list[str]:
+    raw_tags = [google_maps.get("primary_type")] + list(google_maps.get("types") or [])
+    tags: list[str] = []
+    seen: set[str] = set()
+    for tag in raw_tags:
+        normalized = _normalize_keyword(str(tag or ""))
+        if not normalized:
+            continue
+        normalized = normalized.replace(" restaurant", "").replace(" food", "").strip()
+        if not normalized or normalized in {"point of interest", "establishment"}:
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            tags.append(normalized)
+    return tags[:6]
+
+
+def _build_vibe_fallback(google_maps: dict[str, Any]) -> dict[str, Any]:
+    cuisine_tags = _derive_cuisine_tags_from_google(google_maps)
+    display_name = google_maps.get("display_name") or "This restaurant"
+    primary_type = _normalize_keyword(google_maps.get("primary_type") or "restaurant")
+    rating = google_maps.get("rating")
+    summary_parts = [f"{display_name} looks like a {primary_type} option"]
+    if cuisine_tags:
+        summary_parts.append(f"with a {', '.join(cuisine_tags[:3])} profile")
+    if rating:
+        summary_parts.append(f"rated {rating}")
+    return {
+        "result_type": "vibe",
+        "summary": " ".join(summary_parts).strip() + ".",
+        "menu_items": [],
+        "cuisine_tags": cuisine_tags,
+        "dietary_signals": [],
+        "confidence": 0.2,
+        "source_urls": [],
+    }
+
+
+def _compose_candidate_corpus(
+    *,
+    google_maps: dict[str, Any],
+    research_result: dict[str, Any] | None,
+) -> str:
+    parts: list[str] = [
+        google_maps.get("display_name") or "",
+        google_maps.get("formatted_address") or "",
+        google_maps.get("primary_type") or "",
+        " ".join(google_maps.get("types") or []),
+    ]
+    if research_result:
+        parts.append(research_result.get("summary") or "")
+        parts.extend(research_result.get("menu_items") or [])
+        parts.extend(research_result.get("cuisine_tags") or [])
+        parts.extend(research_result.get("dietary_signals") or [])
+    return _normalize_keyword(" ".join(part for part in parts if part))
+
+
+def _keyword_hits(corpus: str, keywords: list[str]) -> int:
+    hits = 0
+    for keyword in keywords:
+        normalized = _normalize_keyword(keyword)
+        if normalized and normalized in corpus:
+            hits += 1
+    return hits
+
+
+def _score_distance(distance_km: float | None) -> float:
+    if distance_km is None:
+        return 8.0
+    if distance_km <= 0.5:
+        return 30.0
+    if distance_km <= 1.0:
+        return 26.0
+    if distance_km <= 2.0:
+        return 20.0
+    if distance_km <= 3.0:
+        return 14.0
+    if distance_km <= 5.0:
+        return 8.0
+    return 3.0
+
+
+def _score_rating(rating: Any, user_rating_count: Any) -> float:
+    rating_value = _coerce_float(rating) or 0.0
+    rating_component = min(16.0, max(0.0, (rating_value / 5.0) * 16.0))
+    try:
+        count_value = int(user_rating_count or 0)
+    except (TypeError, ValueError):
+        count_value = 0
+    count_component = min(4.0, count_value / 50.0)
+    return round(rating_component + count_component, 2)
+
+
+def _score_budget_fit(team_budget: Any, price_level: Any) -> float:
+    numeric_price = _price_level_to_numeric(price_level)
+    if numeric_price is None:
+        return 5.0
+    diff = abs(_budget_target(team_budget) - numeric_price)
+    if diff == 0:
+        return 10.0
+    if diff == 1:
+        return 7.0
+    if diff == 2:
+        return 4.0
+    return 1.0
+
+
+def _score_preference_fit(
+    *,
+    corpus: str,
+    positive_keywords: list[str],
+    negative_keywords: list[str],
+) -> float:
+    positive_hits = _keyword_hits(corpus, positive_keywords)
+    negative_hits = _keyword_hits(corpus, negative_keywords)
+    base = 8.0 if positive_keywords else 10.0
+    score = base + (positive_hits * 4.0) - (negative_hits * 6.0)
+    return round(max(0.0, min(score, 20.0)), 2)
+
+
+def _score_dietary_fit(
+    *,
+    corpus: str,
+    dietary_restrictions: list[str],
+    allergies: list[str],
+    research_result_type: str | None,
+) -> float:
+    normalized_restrictions = [_normalize_keyword(item) for item in dietary_restrictions if item]
+    normalized_allergies = [_normalize_keyword(item) for item in allergies if item]
+    if not normalized_restrictions and not normalized_allergies:
+        return 12.0
+
+    support_map = {
+        "vegetarian": ["vegetarian", "veggie", "vegetarisch", "vegetarian options"],
+        "vegan": ["vegan", "plant based", "pflanzlich"],
+        "pescatarian": ["fish", "seafood", "pescatarian"],
+        "gluten free": ["gluten free", "gluten-free", "gf"],
+        "halal": ["halal"],
+        "kosher": ["kosher"],
+    }
+
+    matched = 0
+    for restriction in normalized_restrictions:
+        candidates = support_map.get(restriction, [restriction])
+        if any(candidate in corpus for candidate in candidates):
+            matched += 1
+
+    if normalized_restrictions:
+        if matched == len(normalized_restrictions):
+            score = 15.0
+        elif matched > 0:
+            score = 10.0
+        else:
+            score = 4.0 if research_result_type == "menu" else 2.0
+    else:
+        score = 8.0
+
+    if normalized_allergies and research_result_type != "menu":
+        score -= 3.0
+
+    return round(max(0.0, min(score, 15.0)), 2)
+
+
+def _score_menu_evidence(research_result: dict[str, Any]) -> float:
+    result_type = research_result.get("result_type")
+    menu_items = research_result.get("menu_items") or []
+    confidence = _coerce_float(research_result.get("confidence")) or 0.0
+    if result_type == "menu" and menu_items:
+        return round(min(5.0, 3.5 + confidence * 1.5), 2)
+    if result_type == "vibe":
+        return round(min(3.0, 1.5 + confidence), 2)
+    return 0.5
+
+
+def _build_recommendation_reasons(
+    *,
+    google_maps: dict[str, Any],
+    score_breakdown: dict[str, float],
+    research_result: dict[str, Any],
+) -> list[str]:
+    reasons: list[str] = []
+    if score_breakdown.get("distance", 0.0) >= 20.0 and google_maps.get("formatted_address"):
+        reasons.append("Close to the team's location.")
+    if score_breakdown.get("rating", 0.0) >= 15.0 and google_maps.get("rating"):
+        reasons.append(f"Strong public rating ({google_maps.get('rating')}).")
+    if research_result.get("result_type") == "menu" and research_result.get("menu_items"):
+        reasons.append("Current menu evidence was found.")
+    elif research_result.get("result_type") == "vibe":
+        reasons.append("Ranked using cuisine and vibe signals when no current menu was available.")
+    if score_breakdown.get("preference_fit", 0.0) >= 12.0:
+        reasons.append("Matches the team's stated cuisine or mood preferences.")
+    return reasons[:4]
+
+
+def _score_discovered_candidate(
+    *,
+    google_maps: dict[str, Any],
+    team: Team,
+    team_preference: Any,
+    research_result: dict[str, Any],
+) -> tuple[float, dict[str, float]]:
+    distance_km: float | None = None
+    lat = _coerce_float(google_maps.get("lat"))
+    lng = _coerce_float(google_maps.get("lng"))
+    if team.location_lat is not None and team.location_lng is not None and lat is not None and lng is not None:
+        distance_km = _straight_line_distance_km(team.location_lat, team.location_lng, lat, lng)
+
+    positive_keywords, negative_keywords = _extract_team_preference_keywords(
+        getattr(team_preference, "other_preferences", {}) or {}
+    )
+    corpus = _compose_candidate_corpus(google_maps=google_maps, research_result=research_result)
+    score_breakdown = {
+        "distance": _score_distance(distance_km),
+        "rating": _score_rating(google_maps.get("rating"), google_maps.get("user_rating_count")),
+        "budget_fit": _score_budget_fit(
+            getattr(getattr(team_preference, "budget_preference", None), "value", getattr(team_preference, "budget_preference", "medium")),
+            google_maps.get("price_level"),
+        ),
+        "preference_fit": _score_preference_fit(
+            corpus=corpus,
+            positive_keywords=positive_keywords,
+            negative_keywords=negative_keywords,
+        ),
+        "dietary_fit": _score_dietary_fit(
+            corpus=corpus,
+            dietary_restrictions=getattr(team_preference, "dietary_restrictions", []) or [],
+            allergies=getattr(team_preference, "allergies", []) or [],
+            research_result_type=research_result.get("result_type"),
+        ),
+        "menu_evidence": _score_menu_evidence(research_result),
+    }
+    total = round(sum(score_breakdown.values()), 2)
+    return total, score_breakdown
+
+
+def _find_existing_restaurant_id(
+    restaurants: list[Restaurant],
+    google_maps: dict[str, Any],
+) -> str | None:
+    place_id = str(google_maps.get("place_id") or "").strip()
+    website_uri = str(google_maps.get("website_uri") or "").strip().lower()
+    maps_uri = str(google_maps.get("maps_uri") or "").strip().lower()
+
+    for restaurant in restaurants:
+        meta_google = (restaurant.meta or {}).get("google_maps") or {}
+        meta_place_id = str(meta_google.get("place_id") or "").strip()
+        meta_website_uri = str(meta_google.get("website_uri") or "").strip().lower()
+        if place_id and meta_place_id == place_id:
+            return restaurant.id
+        if website_uri and restaurant.url.lower() == website_uri:
+            return restaurant.id
+        if website_uri and meta_website_uri == website_uri:
+            return restaurant.id
+        if maps_uri and restaurant.url.lower() == maps_uri:
+            return restaurant.id
+    return None
 
 
 def _use_legacy_menu_scraper() -> bool:
@@ -667,6 +1007,165 @@ async def get_existing_restaurants(
     return ExistingRestaurantsResponse(
         restaurants=existing_restaurants,
         total_count=len(existing_restaurants)
+    )
+
+
+@router.post("/discover-restaurants", response_model=DiscoverRestaurantsResponse)
+async def discover_restaurants(
+    payload: DiscoverRestaurantsRequest,
+    session: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Discover nearby restaurants for a team and rank them deterministically."""
+    team = session.exec(select(Team).where(Team.id == payload.team_id)).first()
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    membership = session.exec(
+        select(TeamMembership).where(
+            TeamMembership.team_id == payload.team_id,
+            TeamMembership.user_id == current_user.id,
+            TeamMembership.is_active == True,
+        )
+    ).first()
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not an active member of this team",
+        )
+
+    if team.location_lat is None or team.location_lng is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Team location with coordinates is required for discovery",
+        )
+
+    safe_radius = max(200, min(int(payload.radius_meters or 1500), 5000))
+    safe_candidate_limit = max(10, min(int(payload.candidate_limit or 15), 20))
+    safe_result_limit = max(1, min(int(payload.result_limit or 5), 5))
+
+    team_preference = aggregate_team_preferences(session, team.id)
+
+    try:
+        nearby_candidates = await search_nearby_places(
+            latitude=team.location_lat,
+            longitude=team.location_lng,
+            radius_meters=float(safe_radius),
+            max_results=safe_candidate_limit,
+        )
+    except GooglePlacesConfigError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except GooglePlacesAPIError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Nearby restaurant search failed: {exc}",
+        )
+
+    unique_candidates: list[dict[str, Any]] = []
+    seen_place_ids: set[str] = set()
+    for candidate in nearby_candidates:
+        google_maps = candidate.get("google_maps") or {}
+        place_id = str(google_maps.get("place_id") or "").strip()
+        if place_id and place_id in seen_place_ids:
+            continue
+        if place_id:
+            seen_place_ids.add(place_id)
+        unique_candidates.append(google_maps)
+
+    all_restaurants = session.exec(select(Restaurant)).all()
+
+    base_ranked: list[dict[str, Any]] = []
+    for google_maps in unique_candidates:
+        base_research = _build_vibe_fallback(google_maps)
+        base_score, base_breakdown = _score_discovered_candidate(
+            google_maps=google_maps,
+            team=team,
+            team_preference=team_preference,
+            research_result=base_research,
+        )
+        base_ranked.append(
+            {
+                "google_maps": google_maps,
+                "base_score": base_score,
+                "base_breakdown": base_breakdown,
+                "existing_restaurant_id": _find_existing_restaurant_id(all_restaurants, google_maps),
+            }
+        )
+
+    base_ranked.sort(key=lambda item: item["base_score"], reverse=True)
+    shortlist = base_ranked[:safe_result_limit]
+    semaphore = asyncio.Semaphore(5)
+
+    async def _research_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+        google_maps = candidate["google_maps"]
+        async with semaphore:
+            try:
+                research = await research_restaurant_with_openai(
+                    restaurant_name=google_maps.get("display_name") or "Unknown restaurant",
+                    restaurant_address=google_maps.get("formatted_address"),
+                    website_uri=google_maps.get("website_uri"),
+                    primary_type=google_maps.get("primary_type"),
+                )
+            except (OpenAIRestaurantResearchConfigError, OpenAIRestaurantResearchError) as exc:
+                logger.warning(
+                    "[discover] OpenAI research failed for %s: %s",
+                    google_maps.get("display_name") or google_maps.get("place_id"),
+                    exc,
+                )
+                research = _build_vibe_fallback(google_maps)
+
+        final_score, score_breakdown = _score_discovered_candidate(
+            google_maps=google_maps,
+            team=team,
+            team_preference=team_preference,
+            research_result=research,
+        )
+        lat = _coerce_float(google_maps.get("lat"))
+        lng = _coerce_float(google_maps.get("lng"))
+        distance_km = None
+        if lat is not None and lng is not None:
+            distance_km = _straight_line_distance_km(team.location_lat, team.location_lng, lat, lng)
+
+        user_rating_count = google_maps.get("user_rating_count")
+        try:
+            user_rating_count_value = int(user_rating_count) if user_rating_count is not None else None
+        except (TypeError, ValueError):
+            user_rating_count_value = None
+
+        return {
+            "display_name": google_maps.get("display_name") or "Unknown restaurant",
+            "formatted_address": google_maps.get("formatted_address"),
+            "website_uri": google_maps.get("website_uri"),
+            "maps_uri": google_maps.get("maps_uri"),
+            "primary_type": google_maps.get("primary_type"),
+            "price_level": google_maps.get("price_level"),
+            "rating": _coerce_float(google_maps.get("rating")),
+            "user_rating_count": user_rating_count_value,
+            "straight_line_distance_km": round(distance_km, 2) if distance_km is not None else None,
+            "compatibility_score": final_score,
+            "score_breakdown": score_breakdown,
+            "recommendation_reasons": _build_recommendation_reasons(
+                google_maps=google_maps,
+                score_breakdown=score_breakdown,
+                research_result=research,
+            ),
+            "research_result_type": research.get("result_type"),
+            "menu_summary": research.get("summary"),
+            "menu_items": research.get("menu_items") or [],
+            "cuisine_tags": research.get("cuisine_tags") or [],
+            "dietary_signals": research.get("dietary_signals") or [],
+            "source_urls": research.get("source_urls") or [],
+            "existing_restaurant_id": candidate.get("existing_restaurant_id"),
+        }
+
+    researched_results = await asyncio.gather(*[_research_candidate(candidate) for candidate in shortlist])
+    researched_results.sort(key=lambda item: item["compatibility_score"], reverse=True)
+
+    return DiscoverRestaurantsResponse(
+        team_id=team.id,
+        team_location=team.location or "",
+        candidate_count=len(unique_candidates),
+        results=[DiscoveredRestaurant(**item) for item in researched_results[:safe_result_limit]],
     )
 
 

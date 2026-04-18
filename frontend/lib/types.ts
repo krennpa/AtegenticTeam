@@ -200,6 +200,42 @@ export interface ExistingRestaurantsResponse {
   totalCount: number
 }
 
+export interface DiscoverRestaurantsRequest {
+  teamId: string
+  radiusMeters?: number
+  candidateLimit?: number
+  resultLimit?: number
+}
+
+export interface DiscoveredRestaurant {
+  displayName: string
+  formattedAddress?: string
+  websiteUri?: string | null
+  mapsUri?: string | null
+  primaryType?: string | null
+  priceLevel?: string | null
+  rating?: number | null
+  userRatingCount?: number | null
+  straightLineDistanceKm?: number | null
+  compatibilityScore: number
+  scoreBreakdown: Record<string, number>
+  recommendationReasons: string[]
+  researchResultType?: string | null
+  menuSummary?: string | null
+  menuItems: string[]
+  cuisineTags: string[]
+  dietarySignals: string[]
+  sourceUrls: string[]
+  existingRestaurantId?: string | null
+}
+
+export interface DiscoverRestaurantsResponse {
+  teamId: string
+  teamLocation: string
+  candidateCount: number
+  results: DiscoveredRestaurant[]
+}
+
 export interface DecisionRun {
   id: string
   organizerUserId: string

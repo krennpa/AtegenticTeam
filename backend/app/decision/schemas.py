@@ -60,3 +60,39 @@ class ExistingRestaurant(CamelModel):
 class ExistingRestaurantsResponse(CamelModel):
     restaurants: List[ExistingRestaurant]
     total_count: int
+
+
+class DiscoverRestaurantsRequest(CamelModel):
+    team_id: str
+    radius_meters: Optional[int] = 1500
+    candidate_limit: Optional[int] = 15
+    result_limit: Optional[int] = 5
+
+
+class DiscoveredRestaurant(CamelModel):
+    display_name: str
+    formatted_address: Optional[str] = None
+    website_uri: Optional[str] = None
+    maps_uri: Optional[str] = None
+    primary_type: Optional[str] = None
+    price_level: Optional[str] = None
+    rating: Optional[float] = None
+    user_rating_count: Optional[int] = None
+    straight_line_distance_km: Optional[float] = None
+    compatibility_score: float
+    score_breakdown: Dict[str, float] = {}
+    recommendation_reasons: List[str] = []
+    research_result_type: Optional[str] = None
+    menu_summary: Optional[str] = None
+    menu_items: List[str] = []
+    cuisine_tags: List[str] = []
+    dietary_signals: List[str] = []
+    source_urls: List[str] = []
+    existing_restaurant_id: Optional[str] = None
+
+
+class DiscoverRestaurantsResponse(CamelModel):
+    team_id: str
+    team_location: str
+    candidate_count: int
+    results: List[DiscoveredRestaurant]

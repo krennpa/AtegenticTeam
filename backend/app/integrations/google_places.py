@@ -9,6 +9,7 @@ from ..core.config import settings
 
 
 TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+NEARBY_SEARCH_URL = "https://places.googleapis.com/v1/places:searchNearby"
 DEFAULT_FIELD_MASK = ",".join(
     [
         "places.id",
@@ -18,6 +19,8 @@ DEFAULT_FIELD_MASK = ",".join(
         "places.googleMapsUri",
         "places.websiteUri",
         "places.primaryType",
+        "places.types",
+        "places.priceLevel",
         "places.rating",
         "places.userRatingCount",
     ]
@@ -53,6 +56,8 @@ def _normalize_place(place: dict[str, Any]) -> dict[str, Any]:
             "maps_uri": place.get("googleMapsUri"),
             "website_uri": place.get("websiteUri"),
             "primary_type": place.get("primaryType"),
+            "types": place.get("types") or [],
+            "price_level": place.get("priceLevel"),
             "rating": place.get("rating"),
             "user_rating_count": place.get("userRatingCount"),
             "last_enriched_at": datetime.now(timezone.utc).isoformat(),
@@ -105,3 +110,51 @@ async def resolve_place_by_text(text_query: str) -> dict[str, Any] | None:
     if not candidates:
         return None
     return candidates[0]
+
+
+async def search_nearby_places(
+    *,
+    latitude: float,
+    longitude: float,
+    radius_meters: float = 1500.0,
+    included_types: list[str] | None = None,
+    field_mask: str = DEFAULT_FIELD_MASK,
+    max_results: int = 20,
+    rank_preference: str = "DISTANCE",
+    language_code: str = "en",
+) -> list[dict[str, Any]]:
+    """Run Places Nearby Search (New) and return normalized place candidates."""
+    api_key = _require_api_key()
+
+    payload = {
+        "includedTypes": included_types or ["restaurant"],
+        "maxResultCount": max_results,
+        "rankPreference": rank_preference,
+        "languageCode": language_code,
+        "locationRestriction": {
+            "circle": {
+                "center": {
+                    "latitude": latitude,
+                    "longitude": longitude,
+                },
+                "radius": radius_meters,
+            }
+        },
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": field_mask,
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(NEARBY_SEARCH_URL, headers=headers, json=payload)
+
+    if response.status_code >= 400:
+        raise GooglePlacesAPIError(
+            f"Places Nearby Search failed with status {response.status_code}: {response.text}"
+        )
+
+    data = response.json()
+    places = data.get("places", [])
+    return [_normalize_place(place) for place in places]

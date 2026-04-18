@@ -2,13 +2,13 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useAuth } from '../../../../lib/auth-context'
-import { TeamWithMembers, AgentDecisionResponse, IngestRestaurantInput, IngestRestaurantsResponse, ExistingRestaurantsResponse, RestaurantDocument } from '../../../../lib/types'
+import { TeamWithMembers, AgentDecisionResponse, IngestRestaurantInput, IngestRestaurantsResponse, ExistingRestaurantsResponse, RestaurantDocument, DiscoverRestaurantsResponse } from '../../../../lib/types'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../../../components/ui/card'
 import { Button } from '../../../../components/ui/button'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '../../../../components/ui/accordion'
-import { RefreshCw, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
+import { RefreshCw, Trash2, ChevronDown, ChevronUp, Compass } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { LoadingSpinner } from '../../../../components/ui/loading-spinner'
@@ -29,6 +29,9 @@ export default function TeamDecisionPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [existingRestaurants, setExistingRestaurants] = useState<ExistingRestaurantsResponse | null>(null)
+  const [discoveryResult, setDiscoveryResult] = useState<DiscoverRestaurantsResponse | null>(null)
+  const [discoveryLoading, setDiscoveryLoading] = useState(false)
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null)
   // Processing state (for data fetching/scraping)
   const [processing, setProcessing] = useState(false)
   const [processResult, setProcessResult] = useState<IngestRestaurantsResponse | null>(null)
@@ -276,6 +279,32 @@ export default function TeamDecisionPage() {
     return source
   }, [existingRestaurants, restaurantSort])
 
+  const handleDiscoverRestaurants = async (e: React.MouseEvent) => {
+    e.preventDefault()
+    if (!api || !team) return
+
+    if (team.locationLat == null || team.locationLng == null) {
+      setDiscoveryError('Team location is required before discovery can run.')
+      return
+    }
+
+    try {
+      setDiscoveryLoading(true)
+      setDiscoveryError(null)
+      const result = await api.post<DiscoverRestaurantsResponse>('/decision/discover-restaurants', {
+        teamId,
+        radiusMeters: 1500,
+        candidateLimit: 15,
+        resultLimit: 5,
+      })
+      setDiscoveryResult(result)
+    } catch (err) {
+      setDiscoveryError(err instanceof Error ? err.message : 'Failed to discover restaurants')
+    } finally {
+      setDiscoveryLoading(false)
+    }
+  }
+
   if (!user) {
     return (
       <div className="text-center py-8">
@@ -504,6 +533,156 @@ export default function TeamDecisionPage() {
                     Some restaurants are using cached data. Consider re-processing if you need the latest menus.
                   </div>
                 )}
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-4 pt-6 border-t border-green-300">
+            <div>
+              <h3 className="text-lg font-medium text-green-900">Nearby Discovery</h3>
+              <p className="text-sm text-green-700">
+                Find candidate restaurants near {team.location || 'the team location'} and rank them by compatibility.
+              </p>
+            </div>
+
+            {team.locationLat == null || team.locationLng == null ? (
+              <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 rounded">
+                Add a team location first to use discovery.
+              </div>
+            ) : null}
+
+            {discoveryError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
+                {discoveryError}
+              </div>
+            )}
+
+            <Button
+              onClick={handleDiscoverRestaurants}
+              disabled={discoveryLoading || team.locationLat == null || team.locationLng == null}
+              className="rounded-2xl bg-emerald-600 hover:bg-emerald-700"
+            >
+              <Compass className="h-4 w-4 mr-2" />
+              {discoveryLoading ? 'Discovering Restaurants…' : 'Discover Restaurants'}
+            </Button>
+
+            {discoveryLoading && (
+              <div className="bg-white border border-green-200 rounded-lg p-6">
+                <LoadingSpinner message="Finding nearby restaurants and checking today's menu..." size="md" />
+              </div>
+            )}
+
+            {discoveryResult && !discoveryLoading && (
+              <div className="space-y-3">
+                <div className="bg-emerald-100 border border-emerald-300 text-emerald-800 px-4 py-3 rounded">
+                  Found {discoveryResult.results.length} ranked restaurants from {discoveryResult.candidateCount} nearby candidates.
+                </div>
+
+                <div className="space-y-3">
+                  {discoveryResult.results.map((restaurant, index) => (
+                    <div key={`${restaurant.displayName}-${restaurant.formattedAddress}-${index}`} className="rounded-lg border border-green-200 bg-white p-4 space-y-3">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <div className="font-medium text-green-900">
+                            {index + 1}. {restaurant.websiteUri ? (
+                              <a
+                                href={restaurant.websiteUri}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-green-900 hover:text-green-700 underline"
+                              >
+                                {restaurant.displayName}
+                              </a>
+                            ) : (
+                              restaurant.displayName
+                            )}
+                          </div>
+                          <div className="text-sm text-slate-600">
+                            {restaurant.formattedAddress}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-lg font-semibold text-emerald-700">
+                            {restaurant.compatibilityScore.toFixed(1)}
+                          </div>
+                          <div className="text-xs text-slate-500">compatibility</div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2 text-xs">
+                        {restaurant.primaryType && (
+                          <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-700">{restaurant.primaryType}</span>
+                        )}
+                        {restaurant.straightLineDistanceKm !== undefined && restaurant.straightLineDistanceKm !== null && (
+                          <span className="rounded-full bg-blue-100 px-2 py-1 text-blue-700">
+                            {restaurant.straightLineDistanceKm.toFixed(2)} km
+                          </span>
+                        )}
+                        {restaurant.rating !== undefined && restaurant.rating !== null && (
+                          <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-700">
+                            Rating {restaurant.rating.toFixed(1)}
+                          </span>
+                        )}
+                        {restaurant.priceLevel && (
+                          <span className="rounded-full bg-rose-100 px-2 py-1 text-rose-700">
+                            {restaurant.priceLevel}
+                          </span>
+                        )}
+                        {restaurant.researchResultType && (
+                          <span className={`rounded-full px-2 py-1 ${restaurant.researchResultType === 'menu' ? 'bg-emerald-100 text-emerald-700' : 'bg-violet-100 text-violet-700'}`}>
+                            {restaurant.researchResultType}
+                          </span>
+                        )}
+                      </div>
+
+                      {restaurant.menuSummary && (
+                        <p className="text-sm text-slate-700">{restaurant.menuSummary}</p>
+                      )}
+
+                      {restaurant.menuItems.length > 0 && (
+                        <div>
+                          <div className="text-xs font-medium uppercase tracking-wide text-slate-500 mb-1">Menu evidence</div>
+                          <ul className="list-disc pl-5 text-sm text-slate-700 space-y-1">
+                            {restaurant.menuItems.map((item) => (
+                              <li key={item}>{item}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {(restaurant.cuisineTags.length > 0 || restaurant.dietarySignals.length > 0) && (
+                        <div className="space-y-2">
+                          {restaurant.cuisineTags.length > 0 && (
+                            <div className="flex flex-wrap gap-2">
+                              {restaurant.cuisineTags.map((tag) => (
+                                <span key={tag} className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-700">
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {restaurant.dietarySignals.length > 0 && (
+                            <div className="flex flex-wrap gap-2">
+                              {restaurant.dietarySignals.map((tag) => (
+                                <span key={tag} className="rounded-full bg-lime-100 px-2 py-1 text-xs text-lime-700">
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {restaurant.recommendationReasons.length > 0 && (
+                        <ul className="list-disc pl-5 text-sm text-slate-600 space-y-1">
+                          {restaurant.recommendationReasons.map((reason) => (
+                            <li key={reason}>{reason}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>
