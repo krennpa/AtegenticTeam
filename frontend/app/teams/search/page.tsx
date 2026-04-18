@@ -4,6 +4,8 @@ import { useState } from 'react'
 import { useAuth } from '../../../lib/auth-context'
 import { Team } from '../../../lib/types'
 import Link from 'next/link'
+import { MapPin } from 'lucide-react'
+import { BaseStatusBadge } from '../../../components/ui/base-status-badge'
 
 export default function TeamSearchPage() {
   const { api, user } = useAuth()
@@ -56,7 +58,7 @@ export default function TeamSearchPage() {
     <div className="max-w-4xl mx-auto p-6">
       <div className="mb-6">
         <h1 className="text-3xl font-bold text-slate-900 mb-4">Search Teams</h1>
-        <p className="text-slate-600">Find and join existing teams to collaborate on lunch decisions.</p>
+        <p className="text-slate-600">Find and join existing teams for masked, location-aware group decisions.</p>
       </div>
 
       <form onSubmit={handleSearch} className="mb-6">
@@ -95,9 +97,15 @@ export default function TeamSearchPage() {
                   {team.description && (
                     <p className="text-slate-600 mb-3">{team.description}</p>
                   )}
-                  {team.location && (
-                    <p className="text-sm text-slate-500 mb-3">Location: {team.location}</p>
-                  )}
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
+                    <BaseStatusBadge hasBase={Boolean(team.location && team.location.trim())} />
+                    {team.location && (
+                      <p className="inline-flex items-center gap-1 text-sm text-slate-500">
+                        <MapPin className="h-3.5 w-3.5" />
+                        {team.location}
+                      </p>
+                    )}
+                  </div>
                   <div className="flex items-center gap-4 text-sm text-slate-500">
                     <span>{team.memberCount} member{team.memberCount !== 1 ? 's' : ''}</span>
                     {team.maxMembers && (
@@ -140,7 +148,7 @@ export default function TeamSearchPage() {
 
       <div className="mt-8 text-center">
         <Link href="/teams" className="text-blue-600 hover:text-blue-800 underline">
-          ← Back to My Teams
+          Back to My Teams
         </Link>
       </div>
     </div>

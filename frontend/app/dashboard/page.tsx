@@ -5,9 +5,11 @@ import Link from 'next/link'
 import { useAuth } from '../../lib/auth-context'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../components/ui/card'
 import { Button } from '../../components/ui/button'
-import { Users, Plus, ArrowRight, Sparkles } from 'lucide-react'
+import { Users, Plus, ArrowRight, Sparkles, MapPin } from 'lucide-react'
 import { Team, DecisionRun } from '../../lib/types'
 import { DashboardPreferencePrompt } from '../../components/forms/DashboardPreferencePrompt'
+import { TeamBaseReadinessCard } from '../../components/forms/TeamBaseReadinessCard'
+import { BaseStatusBadge } from '../../components/ui/base-status-badge'
 
 function extractRestaurantName(decision: DecisionRun): string {
   const name = decision.result?.recommendationRestaurantName
@@ -74,7 +76,7 @@ export default function DashboardPage() {
             <div className="flex items-start justify-between gap-4">
               <div>
                 <CardTitle>Welcome{user?.displayName ? `, ${user.displayName}` : ''}</CardTitle>
-                <CardDescription>Quick actions to keep your team profile up to date.</CardDescription>
+                <CardDescription>Quick actions to keep your team signals and bases ready.</CardDescription>
               </div>
               <div className="space-y-1 text-right">
                 <p className="text-xs uppercase tracking-wide text-slate-400">Overview</p>
@@ -106,6 +108,8 @@ export default function DashboardPage() {
       </section>
 
       <section className="grid gap-4 xl:grid-cols-2">
+        <TeamBaseReadinessCard teams={teams} loading={loadingTeams} />
+
         <Card className="xl:min-h-[24rem]">
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
@@ -136,9 +140,12 @@ export default function DashboardPage() {
                           </div>
                           <div>
                             <h3 className="font-medium text-slate-900">{team.name}</h3>
-                            <p className="text-sm text-slate-500">
-                              {team.memberCount} {team.memberCount === 1 ? 'member' : 'members'}
-                            </p>
+                            <div className="mt-1 flex items-center gap-2">
+                              <p className="text-sm text-slate-500">
+                                {team.memberCount} {team.memberCount === 1 ? 'member' : 'members'}
+                              </p>
+                              <BaseStatusBadge hasBase={Boolean(team.location && team.location.trim())} compact />
+                            </div>
                           </div>
                         </div>
                         <ArrowRight className="h-4 w-4 text-slate-400" />
@@ -196,6 +203,12 @@ export default function DashboardPage() {
                               <span className="flex items-center gap-1 text-xs text-slate-500">
                                 <Users className="h-3 w-3" />
                                 {team.name}
+                              </span>
+                            )}
+                            {team?.location && (
+                              <span className="flex items-center gap-1 text-xs text-slate-500">
+                                <MapPin className="h-3 w-3" />
+                                {team.location}
                               </span>
                             )}
                             <span className="text-xs text-slate-400">

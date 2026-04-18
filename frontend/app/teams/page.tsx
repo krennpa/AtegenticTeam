@@ -4,11 +4,8 @@ import { useState, useEffect } from 'react'
 import { useAuth } from '../../lib/auth-context'
 import { Team, TeamWithMembers } from '../../lib/types'
 import Link from 'next/link'
-import { Button } from '../../components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../components/ui/card'
-import { Avatar, AvatarFallback } from '../../components/ui/avatar'
-import { Badge } from '../../components/ui/badge'
-import { Plus, Users, Calendar, Settings } from 'lucide-react'
+import { BaseStatusBadge } from '../../components/ui/base-status-badge'
+import { MapPin } from 'lucide-react'
 
 export default function TeamsPage() {
   const { api, user } = useAuth()
@@ -125,15 +122,18 @@ export default function TeamsPage() {
             </div>
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">
-                Team Location (optional)
+                Team Base (optional)
               </label>
               <input
                 type="text"
                 value={createForm.location}
                 onChange={(e) => setCreateForm(prev => ({ ...prev, location: e.target.value }))}
-                placeholder="Office, neighborhood, or meetup point"
+                placeholder="Office, neighborhood, or meetup anchor"
                 className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
+              <p className="mt-1 text-xs text-slate-500">
+                Team base helps show distance-aware restaurant context.
+              </p>
             </div>
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">
@@ -188,9 +188,15 @@ export default function TeamsPage() {
                   {team.description && (
                     <p className="text-slate-600 mb-3">{team.description}</p>
                   )}
-                  {team.location && (
-                    <p className="text-sm text-slate-500 mb-3">Location: {team.location}</p>
-                  )}
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
+                    <BaseStatusBadge hasBase={Boolean(team.location && team.location.trim())} />
+                    {team.location && (
+                      <p className="inline-flex items-center gap-1 text-sm text-slate-500">
+                        <MapPin className="h-3.5 w-3.5" />
+                        {team.location}
+                      </p>
+                    )}
+                  </div>
                   <div className="flex items-center gap-4 text-sm text-slate-500">
                     <span>{team.memberCount} member{team.memberCount !== 1 ? 's' : ''}</span>
                     {team.maxMembers && (

@@ -209,6 +209,21 @@ class DecisionRun(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class TeamDecisionContext(SQLModel, table=True):
+    __tablename__ = "team_decision_contexts"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    team_id: str = Field(foreign_key="teams.id", index=True, unique=True)
+    schema_version: str = Field(default="v1")
+    context_json: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(SQLITE_JSON),
+    )
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class Notification(SQLModel, table=True):
     __tablename__ = "notifications"
 

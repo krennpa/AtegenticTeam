@@ -16,6 +16,7 @@ from ...schemas import (
     TeamMemberRead, JoinTeamRequest, UserRead, TeamPreferenceRead
 )
 from ...preferences.service import aggregate_team_preferences
+from ...decision.context_service import rebuild_team_decision_context
 
 router = APIRouter()
 
@@ -119,6 +120,7 @@ def rebuild_team_preferences(
     _require_active_membership(session, team_id, current_user.id)
 
     team_preference = aggregate_team_preferences(session, team_id)
+    rebuild_team_decision_context(session, team_id)
     return TeamPreferenceRead(
         id=team_preference.id,
         team_id=team_preference.team_id,
@@ -162,6 +164,7 @@ async def create_team(
     session.add(membership)
     session.commit()
     aggregate_team_preferences(session, team.id)
+    rebuild_team_decision_context(session, team.id)
     
     return TeamRead(
         id=team.id,
@@ -358,6 +361,7 @@ def join_team(
     session.add(membership)
     session.commit()
     aggregate_team_preferences(session, payload.team_id)
+    rebuild_team_decision_context(session, payload.team_id)
     
     # Return updated team info
     member_count = len(session.exec(
@@ -411,6 +415,7 @@ def leave_team(
     session.add(membership)
     session.commit()
     aggregate_team_preferences(session, team_id)
+    rebuild_team_decision_context(session, team_id)
     
     return None
 
@@ -457,6 +462,7 @@ async def update_team(
     session.add(team)
     session.commit()
     session.refresh(team)
+    rebuild_team_decision_context(session, team_id)
     
     # Get member count
     member_count = len(session.exec(
@@ -663,6 +669,7 @@ def invite_user_to_team(
     session.add(new_membership)
     session.commit()
     aggregate_team_preferences(session, team_id)
+    rebuild_team_decision_context(session, team_id)
     
     # Return updated team info
     member_count = len(session.exec(

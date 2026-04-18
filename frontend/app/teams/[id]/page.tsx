@@ -5,9 +5,12 @@ import { useAuth } from '../../../lib/auth-context'
 import { TeamPreferenceSnapshot, TeamWithMembers, User } from '../../../lib/types'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { MapPin } from 'lucide-react'
 import { Avatar, AvatarFallback } from '../../../components/ui/avatar'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../../../components/ui/dialog'
 import { Button } from '../../../components/ui/button'
+import { BaseStatusBadge } from '../../../components/ui/base-status-badge'
+import { PrivacyCallout } from '../../../components/ui/privacy-callout'
 
 function prettifyPreferenceToken(value: string): string {
   return value
@@ -166,6 +169,8 @@ export default function TeamDetailsPage() {
   const teamDislikes = teamPreference?.otherPreferences?.dislikes ?? []
   const teamMoods = teamPreference?.otherPreferences?.recentMoods ?? []
   const signalEntries = Object.entries(teamSignals)
+  const hasBase = Boolean(team.location && team.location.trim())
+  const hasDistanceReadyBase = typeof team.locationLat === 'number' && typeof team.locationLng === 'number'
 
   return (
     <div className="max-w-4xl mx-auto p-6">
@@ -175,9 +180,15 @@ export default function TeamDetailsPage() {
           {team.description && (
             <p className="text-slate-600 text-lg">{team.description}</p>
           )}
-          {team.location && (
-            <p className="text-slate-500 mt-2">Location: {team.location}</p>
-          )}
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <BaseStatusBadge hasBase={hasBase} />
+            {team.location && (
+              <p className="inline-flex items-center gap-1 text-sm text-slate-500">
+                <MapPin className="h-3.5 w-3.5" />
+                {team.location}
+              </p>
+            )}
+          </div>
         </div>
         <div className="flex gap-2">
           <Link href={`/teams/${teamId}/decision`}>
@@ -255,12 +266,18 @@ export default function TeamDetailsPage() {
                 {new Date(team.createdAt).toLocaleDateString()}
               </span>
             </div>
-            {team.location && (
-              <div>
-                <span className="text-sm font-medium text-slate-500">Location:</span>
-                <span className="ml-2 text-slate-900">{team.location}</span>
-              </div>
-            )}
+            <div>
+              <span className="text-sm font-medium text-slate-500">Team Base:</span>
+              <span className="ml-2 text-slate-900">
+                {team.location || 'Not set'}
+              </span>
+            </div>
+            <div>
+              <span className="text-sm font-medium text-slate-500">Distance Context:</span>
+              <span className="ml-2 text-slate-900">
+                {hasDistanceReadyBase ? 'Ready' : hasBase ? 'Limited' : 'Unavailable'}
+              </span>
+            </div>
             <div>
               <span className="text-sm font-medium text-slate-500">Status:</span>
               <span className={`ml-2 px-2 py-1 rounded text-xs ${
@@ -433,18 +450,11 @@ export default function TeamDetailsPage() {
 
       {/* User Invitation Form is now shown in Dialog above */}
 
-      {/* Privacy Notice */}
-      <div className="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
-        <h3 className="font-semibold text-blue-900 mb-2">Privacy Notice</h3>
-        <p className="text-blue-800 text-sm">
-          Individual preferences (budget, allergies, dietary restrictions) remain private. 
-          Only team membership and display names are visible to other members.
-        </p>
-      </div>
+      <PrivacyCallout className="mt-6" />
 
       <div className="mt-6 text-center">
         <Link href="/teams" className="text-blue-600 hover:text-blue-800 underline">
-          ← Back to Teams
+          Back to Teams
         </Link>
       </div>
     </div>
