@@ -13,7 +13,8 @@ import {
   Home,
   LogOut,
   Plus,
-  Sparkles
+  Sparkles,
+  Gamepad2
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { NotificationBell } from './NotificationBell'
@@ -24,6 +25,7 @@ interface DashboardLayoutProps {
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: Home },
+  { name: 'Preference Game', href: '/preferences', icon: Gamepad2 },
   { name: 'Decision', href: '/decision', icon: Sparkles },
   { name: 'Teams', href: '/teams', icon: Users },
   { name: 'Search Teams', href: '/teams/search', icon: Search },
