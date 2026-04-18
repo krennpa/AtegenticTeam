@@ -43,6 +43,8 @@ class ExistingRestaurant(CamelModel):
     id: str
     url: str
     display_name: Optional[str] = None
+    formatted_address: Optional[str] = None
+    straight_line_distance_km: Optional[float] = None
     last_scraped_at: Optional[str] = None
     menu_type: Optional[str] = None
     content_age_days: Optional[int] = None

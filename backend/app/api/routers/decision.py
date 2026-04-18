@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from typing import List, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime
+from urllib.parse import urlparse
+import math
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select
@@ -20,11 +22,45 @@ from ...decision.schemas import (
     ExistingRestaurantsResponse,
     ExistingRestaurant,
 )
+from ...integrations.google_places import (
+    GooglePlacesAPIError,
+    GooglePlacesConfigError,
+    search_places_by_text,
+)
 from ...schemas import DecisionRunRead
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _straight_line_distance_km(
+    origin_lat: float,
+    origin_lng: float,
+    destination_lat: float,
+    destination_lng: float,
+) -> float:
+    radius_km = 6371.0
+    lat1 = math.radians(origin_lat)
+    lng1 = math.radians(origin_lng)
+    lat2 = math.radians(destination_lat)
+    lng2 = math.radians(destination_lng)
+    dlat = lat2 - lat1
+    dlng = lng2 - lng1
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return radius_km * c
 
 
 def _should_rescrape_restaurant(team_restaurant: TeamRestaurant, latest_doc: RestaurantDocument | None) -> tuple[bool, str]:
@@ -54,6 +90,102 @@ def _should_rescrape_restaurant(team_restaurant: TeamRestaurant, latest_doc: Res
     hours_old = doc_age.total_seconds() / 3600
     
     return True, f"Cache expired ({team_restaurant.cache_strategy}, {hours_old:.1f} hours old)"
+
+
+def _guess_name_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    hostname = (parsed.netloc or parsed.path).lower()
+    hostname = hostname.split(":")[0]
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+
+    parts = [part for part in hostname.split(".") if part]
+    if len(parts) >= 2:
+        candidate = parts[-2]
+    elif parts:
+        candidate = parts[0]
+    else:
+        candidate = hostname
+
+    return candidate.replace("-", " ").replace("_", " ").strip().title()
+
+
+def _guess_name_from_content(content: str | None) -> str | None:
+    if not content:
+        return None
+
+    for line in content.splitlines():
+        candidate = line.strip()
+        if len(candidate) < 4 or len(candidate) > 80:
+            continue
+        if candidate.lower().startswith(("http://", "https://", "www.")):
+            continue
+        if sum(ch.isalpha() for ch in candidate) < 6:
+            continue
+        return candidate
+
+    return None
+
+
+def _build_places_query(
+    *,
+    restaurant: Restaurant,
+    latest_doc: RestaurantDocument | None,
+    scraped_content: str | None = None,
+) -> str:
+    name_candidate = (
+        restaurant.display_name
+        or _guess_name_from_content(scraped_content)
+        or _guess_name_from_content(latest_doc.content_md if latest_doc else None)
+        or _guess_name_from_url(restaurant.url)
+    )
+
+    return " ".join(part for part in [name_candidate, "restaurant"] if part).strip()
+
+
+async def _enrich_restaurant_with_google_maps(
+    *,
+    session: Session,
+    restaurant: Restaurant,
+    latest_doc: RestaurantDocument | None,
+    scraped_content: str | None = None,
+    force_refresh: bool = False,
+) -> None:
+    existing_google_maps = (restaurant.meta or {}).get("google_maps")
+    if existing_google_maps and not force_refresh:
+        return
+
+    query = _build_places_query(
+        restaurant=restaurant,
+        latest_doc=latest_doc,
+        scraped_content=scraped_content,
+    )
+    if not query:
+        return
+
+    try:
+        candidates = await search_places_by_text(query, max_results=1)
+    except GooglePlacesConfigError as exc:
+        logger.info("[ingest] Google Maps enrichment skipped: %s", exc)
+        return
+    except GooglePlacesAPIError as exc:
+        logger.warning("[ingest] Google Maps search failed for %s: %s", restaurant.url, exc)
+        return
+    except Exception as exc:
+        logger.warning("[ingest] Unexpected Google Maps enrichment error for %s: %r", restaurant.url, exc)
+        return
+
+    if not candidates:
+        logger.info("[ingest] No Google Maps match found for query=%r", query)
+        return
+
+    restaurant.meta = {**(restaurant.meta or {}), **candidates[0]}
+    google_maps = restaurant.meta.get("google_maps") or {}
+
+    if not restaurant.display_name and google_maps.get("display_name"):
+        restaurant.display_name = google_maps["display_name"]
+
+    session.add(restaurant)
 
 
 @router.post("/ingest-restaurants", response_model=IngestRestaurantsResponse)
@@ -90,6 +222,8 @@ async def ingest_restaurants(
     processing_details = []
 
     for url in payload.restaurant_urls:
+        scraped_content: str | None = None
+
         # 1. Get or create Restaurant
         r = session.exec(select(Restaurant).where(Restaurant.url == url)).first()
         if not r:
@@ -138,6 +272,7 @@ async def ingest_restaurants(
                 result = await scrape_url(r.url)
                 if result['success']:
                     text_content = result['content']
+                    scraped_content = text_content
                     
                     # Analyze menu content to detect type and temporal patterns
                     menu_metadata = extract_menu_metadata(text_content)
@@ -162,6 +297,14 @@ async def ingest_restaurants(
                     # Update team-specific cache tracking
                     team_restaurant.last_scraped_at = datetime.utcnow()
                     session.add(team_restaurant)
+
+                    await _enrich_restaurant_with_google_maps(
+                        session=session,
+                        restaurant=r,
+                        latest_doc=latest_doc,
+                        scraped_content=scraped_content,
+                        force_refresh=payload.force_rescrape,
+                    )
                     
                     session.commit()
                     scraped_count += 1
@@ -189,6 +332,14 @@ async def ingest_restaurants(
                 })
                 logger.warning("[ingest] Scraping failed for %s: %r", r.url, e)
         else:
+            await _enrich_restaurant_with_google_maps(
+                session=session,
+                restaurant=r,
+                latest_doc=latest_doc,
+                force_refresh=payload.force_rescrape,
+            )
+            session.commit()
+
             # Use cached data
             cached_count += 1
             processing_details.append({
@@ -252,6 +403,8 @@ async def get_existing_restaurants(
     ).all()
 
     # Group by restaurant and get the latest document for each
+    team_lat = _coerce_float(team.location_lat)
+    team_lng = _coerce_float(team.location_lng)
     restaurant_map = {}
     for team_restaurant, restaurant, doc in team_restaurants_with_docs:
         if restaurant.id not in restaurant_map:
@@ -261,11 +414,22 @@ async def get_existing_restaurants(
             
             # Use team-specific display name if available, otherwise use restaurant's
             display_name = team_restaurant.display_name or restaurant.display_name
+            google_maps = (restaurant.meta or {}).get("google_maps") or {}
+            restaurant_lat = _coerce_float(google_maps.get("lat"))
+            restaurant_lng = _coerce_float(google_maps.get("lng"))
+            distance_km = None
+            if None not in (team_lat, team_lng, restaurant_lat, restaurant_lng):
+                distance_km = round(
+                    _straight_line_distance_km(team_lat, team_lng, restaurant_lat, restaurant_lng),
+                    2,
+                )
             
             restaurant_map[restaurant.id] = ExistingRestaurant(
                 id=restaurant.id,
                 url=restaurant.url,
                 display_name=display_name,
+                formatted_address=google_maps.get("formatted_address"),
+                straight_line_distance_km=distance_km,
                 last_scraped_at=team_restaurant.last_scraped_at.isoformat() if team_restaurant.last_scraped_at else None,
                 menu_type=doc.meta.get('menu_type', 'unknown') if doc.meta else 'unknown',
                 content_age_days=content_age_days,

@@ -175,6 +175,9 @@ export default function TeamDetailsPage() {
           {team.description && (
             <p className="text-slate-600 text-lg">{team.description}</p>
           )}
+          {team.location && (
+            <p className="text-slate-500 mt-2">Location: {team.location}</p>
+          )}
         </div>
         <div className="flex gap-2">
           <Link href={`/teams/${teamId}/decision`}>
@@ -252,6 +255,12 @@ export default function TeamDetailsPage() {
                 {new Date(team.createdAt).toLocaleDateString()}
               </span>
             </div>
+            {team.location && (
+              <div>
+                <span className="text-sm font-medium text-slate-500">Location:</span>
+                <span className="ml-2 text-slate-900">{team.location}</span>
+              </div>
+            )}
             <div>
               <span className="text-sm font-medium text-slate-500">Status:</span>
               <span className={`ml-2 px-2 py-1 rounded text-xs ${

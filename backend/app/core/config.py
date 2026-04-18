@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     VERTEX_MODEL: str = Field(default="gemini-2.5-pro", description="Default Vertex chat model")
     OPENAI_API_KEY: str | None = Field(default=None, description="OpenAI API key")
 
+    # Google Maps Platform
+    GOOGLE_MAPS_SERVER_API_KEY: str | None = Field(
+        default=None, description="Server-side API key for Places and Routes"
+    )
+
     # Google Cloud
     GOOGLE_CLOUD_PROJECT: str | None = Field(
         default=None, description="Google Cloud project ID"

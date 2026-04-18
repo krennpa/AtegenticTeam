@@ -85,12 +85,12 @@ def _parse_agent_response(text: str) -> dict:
     }
 
 
-def create_decision_agent_executor(db_session: Session):
+def create_decision_agent_executor(db_session: Session, team_id: str):
     """Creates and returns the LangGraph agent executor."""
 
     # 3. Initialize Tools with the database session
     needs_tool = RetrieveNeedsTool(db_session=db_session)
-    menu_tool = RetrieveMenuMarkdownsTool(db_session=db_session)
+    menu_tool = RetrieveMenuMarkdownsTool(db_session=db_session, team_id=team_id)
 
     # Wrap them in LangChain's Tool class
     tools = [
@@ -124,7 +124,7 @@ def create_decision_agent_executor(db_session: Session):
 
 async def run_decision_agent(request: dict, db_session: Session):
     """Runs the decision agent and returns the final result based on the latest documentation."""
-    agent = create_decision_agent_executor(db_session=db_session)
+    agent = create_decision_agent_executor(db_session=db_session, team_id=request["team_id"])
 
     # Get current day information with full context
     now = datetime.now()
@@ -143,6 +143,7 @@ CONTEXT:
 - Some restaurants have weekly menus (different items each day)
 - Some restaurants have static menus (same items always available)
 - You MUST use the tools to retrieve team needs and restaurant menus with their metadata
+- Restaurant menu tool results may include team location and straight-line distance context
 - Pay attention to menu_type, detected_days, and freshness in the menu data
 - Select dishes that are available TODAY ({current_day})
 

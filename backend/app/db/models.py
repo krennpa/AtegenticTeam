@@ -164,6 +164,10 @@ class Team(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     name: str = Field(index=True)
     description: Optional[str] = None
+    location: Optional[str] = None
+    location_place_id: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
     creator_user_id: str = Field(foreign_key="users.id", index=True)
     
     # Team settings
