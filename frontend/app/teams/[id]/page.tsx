@@ -2,12 +2,18 @@
 
 import { useState, useEffect } from 'react'
 import { useAuth } from '../../../lib/auth-context'
-import { TeamWithMembers, User } from '../../../lib/types'
+import { TeamPreferenceSnapshot, TeamWithMembers, User } from '../../../lib/types'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Avatar, AvatarFallback } from '../../../components/ui/avatar'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../../../components/ui/dialog'
 import { Button } from '../../../components/ui/button'
+
+function prettifyPreferenceToken(value: string): string {
+  return value
+    .replace(/[_:]/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+}
 
 export default function TeamDetailsPage() {
   const { api, user } = useAuth()
@@ -16,9 +22,13 @@ export default function TeamDetailsPage() {
   const teamId = params.id as string
   
   const [team, setTeam] = useState<TeamWithMembers | null>(null)
+  const [teamPreference, setTeamPreference] = useState<TeamPreferenceSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadingTeamPreference, setLoadingTeamPreference] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [teamPreferenceError, setTeamPreferenceError] = useState<string | null>(null)
   const [leaving, setLeaving] = useState(false)
+  const [rebuildingTeamPreference, setRebuildingTeamPreference] = useState(false)
   
   // User search and invitation state
   const [showInviteForm, setShowInviteForm] = useState(false)
@@ -28,10 +38,11 @@ export default function TeamDetailsPage() {
   const [inviting, setInviting] = useState<string | null>(null)
 
   useEffect(() => {
-    if (api && teamId) {
-      loadTeam()
+    if (api && user && teamId) {
+      void loadTeam()
+      void loadTeamPreference()
     }
-  }, [api, teamId])
+  }, [api, teamId, user])
 
   const loadTeam = async () => {
     try {
@@ -42,6 +53,19 @@ export default function TeamDetailsPage() {
       setError(err instanceof Error ? err.message : 'Failed to load team details')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadTeamPreference = async () => {
+    try {
+      setLoadingTeamPreference(true)
+      setTeamPreferenceError(null)
+      const data = await api.getTeamPreferences(teamId)
+      setTeamPreference(data)
+    } catch (err) {
+      setTeamPreferenceError(err instanceof Error ? err.message : 'Failed to load team preference snapshot')
+    } finally {
+      setLoadingTeamPreference(false)
     }
   }
 
@@ -85,7 +109,7 @@ export default function TeamDetailsPage() {
       await api.post(`/teams/${teamId}/invite/${userId}`)
       // Remove user from search results and reload team
       setSearchResults(prev => prev.filter(u => u.id !== userId))
-      loadTeam()
+      await Promise.all([loadTeam(), loadTeamPreference()])
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to invite user')
     } finally {
@@ -93,11 +117,19 @@ export default function TeamDetailsPage() {
     }
   }
 
-  const resetInviteForm = () => {
-    setShowInviteForm(false)
-    setSearchTerm('')
-    setSearchResults([])
-    setError(null)
+  const handleRebuildTeamPreference = async () => {
+    if (!api) return
+
+    try {
+      setRebuildingTeamPreference(true)
+      setTeamPreferenceError(null)
+      const rebuilt = await api.rebuildTeamPreferences(teamId)
+      setTeamPreference(rebuilt)
+    } catch (err) {
+      setTeamPreferenceError(err instanceof Error ? err.message : 'Failed to rebuild team preference snapshot')
+    } finally {
+      setRebuildingTeamPreference(false)
+    }
   }
 
   if (!user) {
@@ -130,6 +162,10 @@ export default function TeamDetailsPage() {
   }
 
   const isCreator = team.creatorUserId === user.id
+  const teamSignals = teamPreference?.otherPreferences?.signals ?? {}
+  const teamDislikes = teamPreference?.otherPreferences?.dislikes ?? []
+  const teamMoods = teamPreference?.otherPreferences?.recentMoods ?? []
+  const signalEntries = Object.entries(teamSignals)
 
   return (
     <div className="max-w-4xl mx-auto p-6">
@@ -258,6 +294,132 @@ export default function TeamDetailsPage() {
             })}
           </div>
         </div>
+      </div>
+
+      <div className="mt-6 bg-white border border-slate-200 rounded-lg p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <div>
+            <h2 className="text-xl font-semibold">Team Preference Snapshot</h2>
+            <p className="text-sm text-slate-600">
+              Aggregated and masked signals only. Individual answers remain private.
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={handleRebuildTeamPreference}
+            disabled={loadingTeamPreference || rebuildingTeamPreference}
+          >
+            {rebuildingTeamPreference ? 'Rebuilding...' : 'Rebuild Snapshot'}
+          </Button>
+        </div>
+
+        {teamPreferenceError && (
+          <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 mb-4">
+            {teamPreferenceError}
+          </div>
+        )}
+
+        {loadingTeamPreference ? (
+          <p className="text-sm text-slate-600">Loading team preference snapshot...</p>
+        ) : teamPreference ? (
+          <div className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Budget Profile</p>
+                <p className="text-base font-semibold text-slate-900">{prettifyPreferenceToken(teamPreference.budgetPreference)}</p>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Contributing Members</p>
+                <p className="text-base font-semibold text-slate-900">{teamPreference.memberCount}</p>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Last Updated</p>
+                <p className="text-base font-semibold text-slate-900">{new Date(teamPreference.updatedAt).toLocaleString()}</p>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500">Shared Allergies</p>
+              <div className="mt-1 flex flex-wrap gap-2">
+                {teamPreference.allergies.length > 0 ? (
+                  teamPreference.allergies.map((allergy) => (
+                    <span key={allergy} className="rounded-full bg-rose-100 px-2 py-1 text-xs text-rose-800">
+                      {prettifyPreferenceToken(allergy)}
+                    </span>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-600">No shared allergy signals yet.</p>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500">Shared Dietary Restrictions</p>
+              <div className="mt-1 flex flex-wrap gap-2">
+                {teamPreference.dietaryRestrictions.length > 0 ? (
+                  teamPreference.dietaryRestrictions.map((restriction) => (
+                    <span key={restriction} className="rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-800">
+                      {prettifyPreferenceToken(restriction)}
+                    </span>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-600">No shared dietary restrictions yet.</p>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500">Top Team Signals</p>
+              <div className="mt-1 space-y-2">
+                {signalEntries.length > 0 ? (
+                  signalEntries.map(([key, signal]) => (
+                    <div key={key} className="rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700">
+                      <span className="font-medium text-slate-900">{prettifyPreferenceToken(key)}</span>
+                      <span className="ml-2">{prettifyPreferenceToken(signal.value)}</span>
+                      <span className="ml-2 text-slate-500">({signal.support}/{signal.memberCount} support)</span>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-600">No aggregated signal cards yet.</p>
+                )}
+              </div>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-500">Recent Team Moods</p>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {teamMoods.length > 0 ? (
+                    teamMoods.map((mood) => (
+                      <span key={mood} className="rounded-full bg-blue-100 px-2 py-1 text-xs text-blue-800">
+                        {prettifyPreferenceToken(mood)}
+                      </span>
+                    ))
+                  ) : (
+                    <p className="text-sm text-slate-600">No mood signals yet.</p>
+                  )}
+                </div>
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-500">Current Team Vetoes</p>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {teamDislikes.length > 0 ? (
+                    teamDislikes.map((dislike) => (
+                      <span key={dislike} className="rounded-full bg-red-100 px-2 py-1 text-xs text-red-700">
+                        {prettifyPreferenceToken(dislike)}
+                      </span>
+                    ))
+                  ) : (
+                    <p className="text-sm text-slate-600">No active vetoes.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-slate-600">No team preference snapshot found yet.</p>
+        )}
       </div>
 
       {/* User Invitation Form is now shown in Dialog above */}

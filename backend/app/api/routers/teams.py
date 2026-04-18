@@ -4,13 +4,89 @@ from datetime import datetime
 from typing import List
 
 from ...api.deps import get_current_user, get_db_session
-from ...db.models import Team, TeamMembership, User, Profile
+from ...db.models import Team, TeamMembership, User, Profile, TeamPreference
 from ...schemas import (
     TeamCreate, TeamRead, TeamUpdate, TeamWithMembersRead, 
-    TeamMemberRead, JoinTeamRequest, UserRead
+    TeamMemberRead, JoinTeamRequest, UserRead, TeamPreferenceRead
 )
+from ...preferences.service import aggregate_team_preferences
 
 router = APIRouter()
+
+
+def _require_active_membership(session: Session, team_id: str, user_id: str) -> TeamMembership:
+    membership = session.exec(
+        select(TeamMembership).where(
+            and_(
+                TeamMembership.team_id == team_id,
+                TeamMembership.user_id == user_id,
+                TeamMembership.is_active == True,
+            )
+        )
+    ).first()
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not an active member of this team",
+        )
+    return membership
+
+
+@router.get("/{team_id}/preferences", response_model=TeamPreferenceRead)
+def get_team_preferences(
+    team_id: str,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db_session),
+):
+    team = session.exec(select(Team).where(Team.id == team_id)).first()
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    _require_active_membership(session, team_id, current_user.id)
+
+    team_preference = session.exec(
+        select(TeamPreference).where(TeamPreference.team_id == team_id)
+    ).first()
+    if not team_preference:
+        team_preference = aggregate_team_preferences(session, team_id)
+
+    return TeamPreferenceRead(
+        id=team_preference.id,
+        team_id=team_preference.team_id,
+        budget_preference=team_preference.budget_preference,
+        allergies=team_preference.allergies,
+        dietary_restrictions=team_preference.dietary_restrictions,
+        other_preferences=team_preference.other_preferences,
+        member_count=team_preference.member_count,
+        created_at=team_preference.created_at.isoformat(),
+        updated_at=team_preference.updated_at.isoformat(),
+    )
+
+
+@router.post("/{team_id}/preferences/rebuild", response_model=TeamPreferenceRead)
+def rebuild_team_preferences(
+    team_id: str,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_db_session),
+):
+    team = session.exec(select(Team).where(Team.id == team_id)).first()
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    _require_active_membership(session, team_id, current_user.id)
+
+    team_preference = aggregate_team_preferences(session, team_id)
+    return TeamPreferenceRead(
+        id=team_preference.id,
+        team_id=team_preference.team_id,
+        budget_preference=team_preference.budget_preference,
+        allergies=team_preference.allergies,
+        dietary_restrictions=team_preference.dietary_restrictions,
+        other_preferences=team_preference.other_preferences,
+        member_count=team_preference.member_count,
+        created_at=team_preference.created_at.isoformat(),
+        updated_at=team_preference.updated_at.isoformat(),
+    )
 
 
 @router.post("/", response_model=TeamRead)
@@ -37,6 +113,7 @@ def create_team(
     )
     session.add(membership)
     session.commit()
+    aggregate_team_preferences(session, team.id)
     
     return TeamRead(
         id=team.id,
@@ -220,6 +297,7 @@ def join_team(
     )
     session.add(membership)
     session.commit()
+    aggregate_team_preferences(session, payload.team_id)
     
     # Return updated team info
     member_count = len(session.exec(
@@ -268,6 +346,7 @@ def leave_team(
     membership.is_active = False
     session.add(membership)
     session.commit()
+    aggregate_team_preferences(session, team_id)
     
     return None
 
@@ -505,6 +584,7 @@ def invite_user_to_team(
     )
     session.add(new_membership)
     session.commit()
+    aggregate_team_preferences(session, team_id)
     
     # Return updated team info
     member_count = len(session.exec(

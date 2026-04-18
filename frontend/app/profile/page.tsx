@@ -2,20 +2,21 @@
 
 import { useState, useEffect } from 'react'
 import { ProfileForm } from '../../components/forms/ProfileForm'
+import { PreferenceGame } from '../../components/forms/PreferenceGame'
 import { useAuth } from '../../lib/auth-context'
 import { Team } from '../../lib/types'
 import Link from 'next/link'
 
 export default function ProfilePage() {
-  const { logout, api } = useAuth()
+  const { logout, api, user } = useAuth()
   const [teams, setTeams] = useState<Team[]>([])
   const [loadingTeams, setLoadingTeams] = useState(true)
 
   useEffect(() => {
-    if (api) {
+    if (api && user) {
       loadTeams()
     }
-  }, [api])
+  }, [api, user])
 
   const loadTeams = async () => {
     try {
@@ -29,6 +30,15 @@ export default function ProfilePage() {
     }
   }
 
+  if (!user) {
+    return (
+      <main className="space-y-6">
+        <h1 className="text-xl font-semibold">My Profile</h1>
+        <p className="text-slate-600">Please log in to view your profile and preferences.</p>
+      </main>
+    )
+  }
+
   return (
     <main className="space-y-6">
       <div className="flex items-center justify-between">
@@ -37,6 +47,7 @@ export default function ProfilePage() {
       </div>
       
       <ProfileForm />
+      <PreferenceGame teams={teams} />
       
       {/* Team Memberships Section */}
       <div className="bg-white border border-slate-200 rounded-lg p-6">

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from .db.models import BudgetPreference, CacheStrategy
 
@@ -58,6 +58,67 @@ class ProfileUpdate(CamelModel):
     allergies: Optional[List[str]] = None
     dietary_restrictions: Optional[List[str]] = None
     other_preferences: Optional[Dict[str, Any]] = None
+
+
+class ProfilePreferenceEventCreate(CamelModel):
+    event_type: str
+    question_key: str
+    answer: Any
+    weight: float = 1.0
+    source: str = "user_gameplay"
+    team_id: Optional[str] = None
+
+
+class ProfilePreferenceEventRead(CamelModel):
+    id: str
+    user_id: str
+    team_id: Optional[str] = None
+    event_type: str
+    question_key: str
+    answer: Any
+    weight: float
+    source: str
+    created_at: str
+
+
+class ProfilePreferenceProgressRead(CamelModel):
+    total_events: int = 0
+    points: int = 0
+    level: int = 1
+    completion_percent: int = 0
+    last_event_at: Optional[str] = None
+    covered_areas: List[str] = Field(default_factory=list)
+    suggested_next_areas: List[str] = Field(default_factory=list)
+
+
+class PreferenceQuestionOption(CamelModel):
+    label: str
+    value: str
+
+
+class PreferenceQuestionRead(CamelModel):
+    question_key: str
+    event_type: str
+    area: str
+    prompt: str
+    options: List[PreferenceQuestionOption] = Field(default_factory=list)
+
+
+class PreferenceQuestionCatalogResponse(CamelModel):
+    recommended_areas: List[str] = Field(default_factory=list)
+    questions: List[PreferenceQuestionRead] = Field(default_factory=list)
+
+
+class TeamPreferenceRead(CamelModel):
+    id: str
+    team_id: str
+    budget_preference: BudgetPreference
+    allergies: List[str] = Field(default_factory=list)
+    dietary_restrictions: List[str] = Field(default_factory=list)
+    other_preferences: Dict[str, Any] = Field(default_factory=dict)
+    member_count: int = 0
+    created_at: str
+    updated_at: str
 
 
 # Restaurant and Menu
